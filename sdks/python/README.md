@@ -161,7 +161,7 @@ for info in boxes:
 `runtime.images` holds the images a runtime can boot from: the local cache on
 an embedded runtime, the server's catalog on `Boxlite.rest(...)`. The same
 code runs against either; `pull` is local only (a REST runtime pulls when a
-box is created) and `usage` is REST only.
+box is created) and `usage` and `move_tag` are REST only.
 
 ```python
 runtime = boxlite.Boxlite.default()
