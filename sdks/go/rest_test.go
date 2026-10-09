@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -194,9 +195,15 @@ func TestRestBoxInfoFetchesCurrentMetadata(t *testing.T) {
 	}
 }
 
+const (
+	oldDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	newDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
 // imageCatalog is a server answering the box API's image routes with fixed
 // bodies. It matches the raw request target, so a name sent as three path
-// segments instead of one reaches no route.
+// segments instead of one reaches no route. A request's body, when it has
+// one, is recorded after its target.
 type imageCatalog struct {
 	*httptest.Server
 	mu       sync.Mutex
@@ -216,25 +223,44 @@ func newImageCatalog(t *testing.T) *imageCatalog {
 			]
 		}`,
 		"GET /v1/images/usage": `{"count":3,"limit":20,"known_bytes":8192}`,
+		"PUT /v1/images/quay.io%2Facme%2Fapp/tags/stable": `{
+			"name":"quay.io/acme/app","tags":["stable"],"curated":false,
+			"versions":[
+				{"digest":"` + newDigest + `","size_bytes":null,"source_ref":"quay.io/acme/app:v2",
+				 "recorded_at":"2026-09-01T00:00:00Z","tags":["stable"],
+				 "last_used_at":"2026-09-02T00:00:00Z","upstream_missing_at":null}
+			],
+			"history":[
+				{"tag":"stable","from_digest":"` + oldDigest + `","to_digest":"` + newDigest + `",
+				 "actor":"user-1","moved_at":"2026-09-03T00:00:00Z"},
+				{"tag":"stable","from_digest":null,"to_digest":"` + oldDigest + `",
+				 "actor":null,"moved_at":"2026-08-15T12:30:00Z"}
+			]
+		}`,
 	}
 	catalog := &imageCatalog{}
 	catalog.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		request := r.Method + " " + r.RequestURI
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		catalog.mu.Lock()
-		catalog.requests = append(catalog.requests, request)
+		catalog.requests = append(catalog.requests, strings.TrimSpace(request+" "+string(body)))
 		catalog.mu.Unlock()
 
 		if request == "DELETE /v1/images/quay.io%2Facme%2Fapp" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		body, ok := routes[request]
+		answer, ok := routes[request]
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, body)
+		_, _ = io.WriteString(w, answer)
 	}))
 	t.Cleanup(catalog.Close)
 	return catalog
@@ -330,5 +356,50 @@ func TestRestImagesRemoveDeletesTheNameAsOneSegment(t *testing.T) {
 	want := []string{"DELETE /v1/images/quay.io%2Facme%2Fapp"}
 	if got := catalog.received(); !reflect.DeepEqual(got, want) {
 		t.Errorf("requests: got %q, want %q", got, want)
+	}
+}
+
+func TestRestImagesMoveTagPutsTheDigestAndReadsTheMovedImage(t *testing.T) {
+	catalog := newImageCatalog(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	detail, err := catalog.images(t).MoveTag(ctx, "quay.io/acme/app", "stable", newDigest)
+	if err != nil {
+		t.Fatalf("MoveTag: %v", err)
+	}
+
+	want := []string{`PUT /v1/images/quay.io%2Facme%2Fapp/tags/stable {"digest":"` + newDigest + `"}`}
+	if got := catalog.received(); !reflect.DeepEqual(got, want) {
+		t.Errorf("requests: got %q, want %q", got, want)
+	}
+	if len(detail.Versions) != 1 {
+		t.Fatalf("Versions: got %d, want 1", len(detail.Versions))
+	}
+	version := detail.Versions[0]
+	if !reflect.DeepEqual(version.Tags, []string{"stable"}) {
+		t.Errorf("version.Tags: got %q", version.Tags)
+	}
+	if want := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC); version.LastUsedAt == nil || !version.LastUsedAt.Equal(want) {
+		t.Errorf("version.LastUsedAt: got %v, want %v", version.LastUsedAt, want)
+	}
+	if version.UpstreamMissingAt != nil {
+		t.Errorf("version.UpstreamMissingAt: got %v, want nil", version.UpstreamMissingAt)
+	}
+	wantHistory := []ImageTagEvent{
+		{Tag: "stable", FromDigest: oldDigest, ToDigest: newDigest, Actor: "user-1",
+			MovedAt: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)},
+		{Tag: "stable", ToDigest: oldDigest,
+			MovedAt: time.Date(2026, 8, 15, 12, 30, 0, 0, time.UTC)},
+	}
+	if len(detail.History) != len(wantHistory) {
+		t.Fatalf("History: got %+v, want %+v", detail.History, wantHistory)
+	}
+	for idx, event := range detail.History {
+		want := wantHistory[idx]
+		if event.Tag != want.Tag || event.FromDigest != want.FromDigest ||
+			event.ToDigest != want.ToDigest || event.Actor != want.Actor || !event.MovedAt.Equal(want.MovedAt) {
+			t.Errorf("History[%d]: got %+v, want %+v", idx, event, want)
+		}
 	}
 }
