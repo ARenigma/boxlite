@@ -246,7 +246,7 @@ await box.stop();
 `runtime.images` holds the images a runtime can boot from: the local cache on
 an embedded runtime, the server's catalog on `JsBoxlite.rest(...)`. The same
 code runs against either; `pull` is local only (a REST runtime pulls when a
-box is created) and `usage` is REST only.
+box is created) and `usage` and `moveTag` are REST only.
 
 ```typescript
 import { JsBoxlite } from "boxlite";
