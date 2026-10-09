@@ -41,6 +41,7 @@ import { BoxRepository } from '../repositories/box.repository'
 import { getStateChangeLockKey } from '../utils/lock-key.util'
 import { OnAsyncEvent } from '../../common/decorators/on-async-event.decorator'
 import { sanitizeBoxError } from '../utils/sanitize-error.util'
+import { ImagePullFailureService } from '../../image/services/image-pull-failure.service'
 
 @Injectable()
 export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown {
@@ -56,6 +57,7 @@ export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown
     private readonly boxStartAction: BoxStartAction,
     private readonly boxStopAction: BoxStopAction,
     private readonly boxDestroyAction: BoxDestroyAction,
+    private readonly imagePullFailureService: ImagePullFailureService,
   ) {}
 
   async onApplicationShutdown() {
@@ -380,7 +382,9 @@ export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown
 
           const updateData: Partial<Box> = {
             state: BoxState.ERROR,
-            errorReason,
+            // A runner that pulls while it answers the call, rather than in a
+            // job, reports a failed pull here.
+            errorReason: await this.imagePullFailureService.reasonFor(box, errorReason),
             recoverable,
           }
 

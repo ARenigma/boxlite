@@ -17,6 +17,7 @@ import { RedisLockProvider } from '../common/redis-lock.provider'
 import { ResourceType } from '../enums/resource-type.enum'
 import { getStateChangeLockKey } from '../utils/lock-key.util'
 import { BoxMigrationJobReceiver, isMigrationJobType } from './box-migration-job-receiver.service'
+import { ImagePullFailureService } from '../../image/services/image-pull-failure.service'
 
 /**
  * Service for handling entity state updates based on job completion (v2 runners only).
@@ -30,6 +31,7 @@ export class JobStateHandlerService {
     private readonly boxRepository: BoxRepository,
     private readonly redisLockProvider: RedisLockProvider,
     private readonly boxMigrationJobReceiver: BoxMigrationJobReceiver,
+    private readonly imagePullFailureService: ImagePullFailureService,
   ) {}
 
   /**
@@ -116,7 +118,9 @@ export class JobStateHandlerService {
         this.logger.error(`CREATE_BOX job ${job.id} failed for box ${boxId}: ${job.errorMessage}`)
         updateData.state = BoxState.ERROR
         const { recoverable, errorReason } = sanitizeBoxError(job.errorMessage)
-        updateData.errorReason = errorReason || 'Failed to create box'
+        // Creating is where a box first pulls its image.
+        updateData.errorReason =
+          (await this.imagePullFailureService.reasonFor(box, errorReason)) || 'Failed to create box'
         updateData.recoverable = recoverable
       }
 
@@ -158,7 +162,9 @@ export class JobStateHandlerService {
         this.logger.error(`START_BOX job ${job.id} failed for box ${boxId}: ${job.errorMessage}`)
         updateData.state = BoxState.ERROR
         const { recoverable, errorReason } = sanitizeBoxError(job.errorMessage)
-        updateData.errorReason = errorReason || 'Failed to start box'
+        // A box created without starting pulls nothing until it starts.
+        updateData.errorReason =
+          (await this.imagePullFailureService.reasonFor(box, errorReason)) || 'Failed to start box'
         updateData.recoverable = recoverable
       }
 
