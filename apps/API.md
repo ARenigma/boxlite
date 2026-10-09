@@ -366,10 +366,10 @@ deployments (shared with the control-plane API)
 Most resource paths accept both an unprefixed form and an organization-prefixed
 form. The tables write that as `[/{prefix}]`; clients can discover their prefix
 through `GET /api/v1/me`. Except for configuration discovery, these routes use
-combined bearer authentication. The box, volume and registry resource routes
-also apply organization authorization; identity discovery at `GET /api/v1/me`
-can return `path_prefix: null` for an authenticated user with no organization
-membership.
+combined bearer authentication. The box, volume, image and registry resource
+routes also apply organization authorization; identity discovery at
+`GET /api/v1/me` can return `path_prefix: null` for an authenticated user with
+no organization membership.
 
 <details>
 <summary><b>Discovery</b> · 2 routes</summary>
@@ -427,6 +427,22 @@ the portable contract, which the runner's own route registration enforces.
 | `GET`    | `/api/v1[/{prefix}]/volumes`                            | Lists volumes in the organization.            |
 | `GET`    | `/api/v1[/{prefix}]/volumes/{volumeId}`                 | Gets a volume by ID.                          |
 | `DELETE` | `/api/v1[/{prefix}]/volumes/{volumeId}?force={boolean}` | Deletes a volume, optionally forcing removal. |
+
+</details>
+
+<details>
+<summary><b>Images</b> · 5 routes</summary>
+
+| Method   | Path                                          | What it does                                                                                           |
+| -------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `GET`    | `/api/v1[/{prefix}]/images`                   | Lists one row per reference the organization can boot from; curated images are left out.               |
+| `GET`    | `/api/v1[/{prefix}]/images/usage`             | Counts held images against the limit and sums the sizes their versions declared.                       |
+| `GET`    | `/api/v1[/{prefix}]/images/{name}`            | Gets an image: its versions with their tags, last use and upstream state, and the last 100 tag events. |
+| `PUT`    | `/api/v1[/{prefix}]/images/{name}/tags/{tag}` | Points a tag at the version with a digest and records the move; needs `write:images`.                  |
+| `DELETE` | `/api/v1[/{prefix}]/images/{name}`            | Removes the catalog entry, not the bytes, unless a box can still boot from it.                         |
+
+The same catalog as `/api/images`, in the box API's snake_case shapes and with
+versions named by digest, for SDK clients.
 
 </details>
 
