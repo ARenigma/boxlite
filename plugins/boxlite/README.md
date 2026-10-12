@@ -4,17 +4,31 @@ Build or adapt an app, deploy it through the BoxLite CLI, return its registered 
 
 ## Install and use
 
-For a standalone marketplace supplied as a test package, extract it and use its absolute directory:
+### From GitHub
+
+You need Git, Make, Python 3.9+ and the Codex or Claude Code CLI. Download the source and generate the standalone marketplace:
 
 ~~~sh
-codex plugin marketplace add ABSOLUTE_MARKETPLACE_DIRECTORY
+git clone --depth 1 --branch main https://github.com/boxlite-ai/boxlite.git boxlite-plugin
+cd boxlite-plugin
+make plugin:boxlite:dist
+~~~
+
+This validates and packages the skills; it does not build the BoxLite CLI. Run the installation commands below from the cloned repository root. Keep the checkout because it provides the local marketplace source.
+
+### Install in Codex or Claude Code
+
+For a supplied test marketplace archive, extract it and replace the marketplace path below with the extracted marketplace's absolute directory.
+
+~~~sh
+codex plugin marketplace add "$PWD/target/plugins/boxlite-marketplace"
 codex plugin add boxlite@boxlite
 ~~~
 
 For Claude Code:
 
 ~~~sh
-claude plugin marketplace add ABSOLUTE_MARKETPLACE_DIRECTORY
+claude plugin marketplace add "$PWD/target/plugins/boxlite-marketplace"
 claude plugin install boxlite@boxlite
 claude plugin list
 claude plugin details boxlite
