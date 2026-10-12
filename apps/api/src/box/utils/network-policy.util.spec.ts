@@ -1,5 +1,10 @@
 import { NetworkMode } from '../enums/network-mode.enum'
-import { allowListFromAllowNet, inboundModeFromPublic, outboundModeFromBlockAll } from './network-policy.util'
+import {
+  allowListFromAllowNet,
+  allowNetFromList,
+  inboundModeFromPublic,
+  outboundModeFromBlockAll,
+} from './network-policy.util'
 
 describe('network policy translation', () => {
   // Polarity differs per direction: public → enabled, blockAll → disabled.
@@ -16,6 +21,15 @@ describe('network policy translation', () => {
     [false, NetworkMode.ENABLED],
   ])('maps networkBlockAll=%s to outbound %s', (blockAll, expected) => {
     expect(outboundModeFromBlockAll(blockAll)).toBe(expected)
+  })
+
+  it.each([
+    ['api.openai.com, 10.0.0.0/8 ,', ['api.openai.com', '10.0.0.0/8']],
+    ['', undefined],
+    [' , ', undefined],
+    [undefined, undefined],
+  ])('splits %j into entries', (list, expected) => {
+    expect(allowNetFromList(list)).toEqual(expected)
   })
 
   it.each([
