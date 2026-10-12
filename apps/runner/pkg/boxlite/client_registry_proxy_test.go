@@ -19,11 +19,20 @@ var configuredProxy = RegistryProxy{
 	Password: "the-runners-own-key",
 }
 
-// The registry proxy is one more ImageRegistry, shaped exactly as the ghcr entry
-// is: an authenticated HTTPS host. That is the whole integration — the runtime
-// and every SDK already carry this type, so nothing below the runner changes.
+func findRegistry(registries []boxlite.ImageRegistry, host string) (boxlite.ImageRegistry, bool) {
+	for _, r := range registries {
+		if r.Host == host {
+			return r, true
+		}
+	}
+	return boxlite.ImageRegistry{}, false
+}
+
+// The registry proxy is one more ImageRegistry: an authenticated HTTPS host.
+// That is the whole integration — the runtime and every SDK already carry this
+// type, so nothing below the runner changes.
 func TestBuildImageRegistries_RegistryProxyIsAnAuthenticatedHTTPSHost(t *testing.T) {
-	registries := buildImageRegistries(nil, "", "", configuredProxy)
+	registries := buildImageRegistries(nil, configuredProxy)
 
 	proxy, ok := findRegistry(registries, configuredProxy.Host)
 	if !ok {
@@ -37,12 +46,6 @@ func TestBuildImageRegistries_RegistryProxyIsAnAuthenticatedHTTPSHost(t *testing
 	if !reflect.DeepEqual(proxy, want) {
 		t.Errorf("registry proxy entry = %+v, want %+v", proxy, want)
 	}
-
-	// Same shape as ghcr's: the two differ in host and credential and nothing else.
-	ghcr, _ := findRegistry(buildImageRegistries(nil, "u", "p", RegistryProxy{}), "ghcr.io")
-	if proxy.Transport != ghcr.Transport || proxy.SkipVerify != ghcr.SkipVerify || proxy.Search != ghcr.Search {
-		t.Errorf("registry proxy entry %+v is not shaped like the ghcr entry %+v", proxy, ghcr)
-	}
 }
 
 // Search decides whether an unqualified reference — `alpine:3.20` — is tried
@@ -50,7 +53,7 @@ func TestBuildImageRegistries_RegistryProxyIsAnAuthenticatedHTTPSHost(t *testing
 // would be offered to the proxy first, which is the creation path this release
 // promises to leave alone.
 func TestBuildImageRegistries_RegistryProxyIsNeverSearched(t *testing.T) {
-	proxy, ok := findRegistry(buildImageRegistries(nil, "", "", configuredProxy), configuredProxy.Host)
+	proxy, ok := findRegistry(buildImageRegistries(nil, configuredProxy), configuredProxy.Host)
 	if !ok {
 		t.Fatal("no entry for the registry proxy")
 	}
@@ -64,10 +67,10 @@ func TestBuildImageRegistries_RegistryProxyIsNeverSearched(t *testing.T) {
 // opts in.
 func TestBuildImageRegistries_NoRegistryProxyIsTheOldListExactly(t *testing.T) {
 	insecure := []string{"10.0.0.5:5000"}
-	without := buildImageRegistries(insecure, "boxlite-ci", "ghp_secret", RegistryProxy{})
+	without := buildImageRegistries(insecure, RegistryProxy{})
 
-	if len(without) != 2 {
-		t.Fatalf("expected the insecure and ghcr entries alone, got %d: %+v", len(without), without)
+	if len(without) != 1 {
+		t.Fatalf("expected the insecure entry alone, got %d: %+v", len(without), without)
 	}
 	for _, registry := range without {
 		if registry.Host == configuredProxy.Host {
@@ -85,7 +88,7 @@ func TestBuildImageRegistries_PartialRegistryProxyAddsNothing(t *testing.T) {
 		"no username": {Host: configuredProxy.Host, Password: "k"},
 		"no host":     {Username: "runner", Password: "k"},
 	} {
-		registries := buildImageRegistries(nil, "", "", partial)
+		registries := buildImageRegistries(nil, partial)
 		if len(registries) != 0 {
 			t.Errorf("%s: a partial registry proxy produced %+v", name, registries)
 		}
@@ -99,7 +102,7 @@ func TestBuildImageRegistries_PartialRegistryProxyAddsNothing(t *testing.T) {
 // answered 401 by a proxy that was configured correctly.
 func TestBuildImageRegistries_InsecureRegistryProxyIsOneEntryWithItsCredential(t *testing.T) {
 	local := RegistryProxy{Host: "127.0.0.1:4100", Username: "runner", Password: "local-key"}
-	registries := buildImageRegistries([]string{"127.0.0.1:25000", "127.0.0.1:4100"}, "", "", local)
+	registries := buildImageRegistries([]string{"127.0.0.1:25000", "127.0.0.1:4100"}, local)
 
 	var named []boxlite.ImageRegistry
 	for _, registry := range registries {
@@ -130,7 +133,7 @@ func TestBuildImageRegistries_RegistryProxyHostIsNormalized(t *testing.T) {
 	written := configuredProxy
 	written.Host = "https://registry-proxy-123.run.app/"
 
-	if _, ok := findRegistry(buildImageRegistries(nil, "", "", written), "registry-proxy-123.run.app"); !ok {
+	if _, ok := findRegistry(buildImageRegistries(nil, written), "registry-proxy-123.run.app"); !ok {
 		t.Errorf("a proxy host written as a URL did not reduce to its host")
 	}
 }
@@ -164,8 +167,8 @@ func TestWarnOnPartialRegistryProxySaysWhatIsMissing(t *testing.T) {
 // were.
 func TestBuildImageRegistries_RegistryProxyLeavesEveryOtherEntryAlone(t *testing.T) {
 	insecure := []string{"10.0.0.5:5000", "127.0.0.1:25000"}
-	without := buildImageRegistries(insecure, "boxlite-ci", "ghp_secret", RegistryProxy{})
-	with := buildImageRegistries(insecure, "boxlite-ci", "ghp_secret", configuredProxy)
+	without := buildImageRegistries(insecure, RegistryProxy{})
+	with := buildImageRegistries(insecure, configuredProxy)
 
 	var others []boxlite.ImageRegistry
 	for _, registry := range with {
@@ -189,7 +192,7 @@ func TestAnUnusableRegistryProxyHostIsReportedNotSilentlyDropped(t *testing.T) {
 	for _, host := range []string{"https://", "   ", "https:///"} {
 		unusable := RegistryProxy{Host: host, Username: "runner", Password: configuredProxy.Password}
 
-		if registries := buildImageRegistries(nil, "", "", unusable); len(registries) != 0 {
+		if registries := buildImageRegistries(nil, unusable); len(registries) != 0 {
 			t.Errorf("host %q produced %+v", host, registries)
 		}
 
