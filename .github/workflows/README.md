@@ -127,6 +127,8 @@ empty-upload path; package or upload failures block `Test (conclusion)`.
 The package validator requires onboarding to name a distributed, frontmatter-validated
 `skills/<name>/SKILL.md` inventory. Excluded caches and shipped reference files cannot
 serve as onboarding skills, even when both manifests name the same existing file or alias.
+Each onboarding regression restores original manifest bytes and removes its invalid resource
+before the next case, so leftover invalid state cannot mask a later failure.
 
 After verifying normal uploads and the skipped-coverage path on PRs and merge
 groups, require `codecov/patch` from the Codecov app in the main ruleset alongside

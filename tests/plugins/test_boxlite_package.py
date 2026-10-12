@@ -37,13 +37,33 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as zipped:
             self.assertIn('plugin.json', zipped.namelist())
             self.assertIn('skills/boxlite/SKILL.md', zipped.namelist())
+            self.assertIn('.claude-plugin/plugin.json', zipped.namelist())
             self.assertFalse(any('node_modules' in name for name in zipped.namelist()))
             self.assertFalse(any(name.startswith('templates/') for name in zipped.namelist()))
         catalog = json.loads((output / 'boxlite-marketplace/.agents/plugins/marketplace.json').read_text())
         target = output / 'boxlite-marketplace' / catalog['plugins'][0]['source']['path']
         self.assertTrue((target / 'plugin.json').exists())
+        claude_catalog = json.loads((output / 'boxlite-marketplace/.claude-plugin/marketplace.json').read_text())
+        claude_target = output / 'boxlite-marketplace' / claude_catalog['plugins'][0]['source']
+        self.assertEqual(target.resolve(), claude_target.resolve())
+        self.assertTrue((claude_target / '.claude-plugin/plugin.json').exists())
         self.assertEqual(archive.read_bytes(), package.build(output, self.root).read_bytes())
 
+    def test_rejects_claude_manifest_identity_drift(self):
+        """Reject drift in each Claude identity field before staging a package."""
+        manifest = self.root / '.claude-plugin/plugin.json'
+        original = manifest.read_text()
+        for key, replacement in (('name', 'another-plugin'), ('version', '0.2.0'),
+                                 ('description', 'Another plugin description.')):
+            with self.subTest(field=key):
+                value = json.loads(original)
+                value[key] = replacement
+                manifest.write_text(json.dumps(value))
+                try:
+                    with self.assertRaisesRegex(ValueError, f'Claude compatibility identity differs: {key}'):
+                        package.validate(self.root)
+                finally:
+                    manifest.write_text(original)
 
     def test_rejects_missing_or_drifted_codex_onboarding(self):
         """The compatibility host must resolve the same packaged setup skill."""
@@ -70,21 +90,27 @@ class PackageTests(unittest.TestCase):
         portable = self.root / 'plugin.json'
         codex = self.root / '.codex-plugin/plugin.json'
         skill_text = (self.root / 'skills/boxlite-setup/SKILL.md').read_text()
+        originals = {path: path.read_text() for path in (portable, codex)}
         for relative in ('node_modules/setup/SKILL.md', 'skills/dist/SKILL.md',
                          'references/setup/SKILL.md', 'node_modules/linked/SKILL.md'):
             with self.subTest(path=relative):
                 skill = self.root / relative
-                skill.parent.mkdir(parents=True, exist_ok=True)
-                if relative == 'node_modules/linked/SKILL.md':
-                    skill.symlink_to(self.root / 'skills/boxlite-setup/SKILL.md')
-                else:
-                    skill.write_text(skill_text)
-                for manifest in (portable, codex):
-                    value = json.loads(manifest.read_text())
-                    value['extensions']['com.openai']['onboardingSkill'] = './' + relative
-                    manifest.write_text(json.dumps(value))
-                with self.assertRaisesRegex(ValueError, 'packaged skill'):
-                    package.build(Path(self.temp.name) / 'output', self.root)
+                try:
+                    skill.parent.mkdir(parents=True, exist_ok=True)
+                    if relative == 'node_modules/linked/SKILL.md':
+                        skill.symlink_to(self.root / 'skills/boxlite-setup/SKILL.md')
+                    else:
+                        skill.write_text(skill_text)
+                    for manifest in (portable, codex):
+                        value = json.loads(manifest.read_text())
+                        value['extensions']['com.openai']['onboardingSkill'] = './' + relative
+                        manifest.write_text(json.dumps(value))
+                    with self.assertRaisesRegex(ValueError, 'packaged skill'):
+                        package.build(Path(self.temp.name) / 'output', self.root)
+                finally:
+                    skill.unlink(missing_ok=True)
+                    for manifest, original in originals.items():
+                        manifest.write_text(original)
 
     def test_rebuild_removes_stale_marketplace_files(self):
         """Rebuild the real marketplace without retaining obsolete resources."""
@@ -127,7 +153,7 @@ class PackageTests(unittest.TestCase):
 
     def test_rejects_missing_manifest_files(self):
         """Report absent required manifests as package validation errors."""
-        for relative in ('plugin.json', '.codex-plugin/plugin.json'):
+        for relative in ('plugin.json', '.codex-plugin/plugin.json', '.claude-plugin/plugin.json'):
             path = self.root / relative
             original = path.read_bytes()
             with self.subTest(manifest=relative):
@@ -145,6 +171,7 @@ class PackageTests(unittest.TestCase):
                             ('extensions', 'com.openai', 'interface'),
                             ('extensions', 'com.openai', 'onboardingSkill')],
             '.codex-plugin/plugin.json': [(key,) for key in ('name', 'version', 'description', 'interface')],
+            '.claude-plugin/plugin.json': [(key,) for key in ('name', 'version', 'description')],
         }
         fields['plugin.json'] += [('extensions', 'com.openai', 'interface', key)
                                   for key in ('composerIcon', 'logo')]
@@ -231,6 +258,52 @@ class PackageTests(unittest.TestCase):
                 for line in coverage:
                     self.assertIn(f'{override or interpreter} -m coverage ', line)
 
+    @unittest.skipUnless(shutil.which('make'), 'Make is not installed')
+    def test_make_claude_strict_validation_and_failure_propagation(self):
+        """Reach both CLI boundaries with real packaging, stopping on source failure."""
+        root = Path(self.temp.name) / 'make-claude'
+        shutil.copytree(self.root, root / 'plugins/boxlite')
+        (root / 'scripts/plugins').mkdir(parents=True)
+        shutil.copyfile(REPO / 'scripts/plugins/boxlite.py', root / 'scripts/plugins/boxlite.py')
+        (root / 'tests/plugins').mkdir(parents=True)
+        (root / 'tests/plugins/test_package.py').write_text(
+            'import unittest\nfrom scripts.plugins.boxlite import validate\n'
+            'class PackageBoundary(unittest.TestCase):\n'
+            '    def test_validate(self):\n        self.assertTrue(validate())\n')
+        workaround = (REPO / 'Makefile').read_text().split('# Workaround for macOS', 1)[1]
+        (root / 'Makefile').write_text(
+            f'include {REPO / "make/test.mk"}\ninclude {REPO / "make/plugins.mk"}\n.PHONY: $(PHONY_TARGETS)\n# Workaround for macOS'
+            + workaround)
+        log = root / 'claude-invocations'
+        executable = root / 'claude'
+        executable.write_text(
+            '#!/bin/sh\n'
+            f'printf \'%s\\n\' "$*" >> {shlex.quote(str(log))}\n'
+            'if [ "$4" = "plugins/boxlite" ]; then\n'
+            '    exit "$CLAUDE_TEST_SOURCE_STATUS"\n'
+            'fi\nexit 0\n')
+        executable.chmod(0o755)
+        environment = os.environ.copy()
+        for key in ('MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES', 'PLUGIN_PYTHON',
+                    'PLUGIN_COVERAGE_PYTHON'):
+            environment.pop(key, None)
+        environment['PATH'] = str(root) + os.pathsep + environment.get('PATH', '')
+        expected = ['plugin validate --strict plugins/boxlite',
+                    'plugin validate --strict target/plugins/boxlite-marketplace']
+        for source_status in (0, 7):
+            with self.subTest(source_status=source_status):
+                log.write_text('')
+                environment['CLAUDE_TEST_SOURCE_STATUS'] = str(source_status)
+                result = subprocess.run(
+                    ['make', '--no-print-directory', 'plugin:boxlite:check:cc',
+                     f'PLUGIN_PYTHON={sys.executable}'], cwd=root, env=environment,
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0 if source_status == 0 else 2,
+                                 result.stdout + result.stderr)
+                self.assertEqual(log.read_text().splitlines(),
+                                 expected if source_status == 0 else expected[:1])
+                self.assertTrue((root / 'target/plugins/boxlite-marketplace'
+                                 '/.claude-plugin/marketplace.json').exists())
 
     @unittest.skipUnless(shutil.which('make'), 'Make is not installed')
     def test_make_targets_validate_with_same_named_files(self):
@@ -245,9 +318,9 @@ class PackageTests(unittest.TestCase):
         (root / 'Makefile').write_text(
             f'include {REPO / "make/test.mk"}\ninclude {REPO / "make/plugins.mk"}\n.PHONY: $(PHONY_TARGETS)\n# Workaround for macOS'
             + workaround)
-        for target in ('plugin:boxlite:check', 'plugin:boxlite:dist'):
+        for target in ('plugin:boxlite:check', 'plugin:boxlite:dist', 'plugin:boxlite:check:cc'):
             (root / target).touch()
-        for target in ('plugin:boxlite:check', 'plugin:boxlite:dist'):
+        for target in ('plugin:boxlite:check', 'plugin:boxlite:dist', 'plugin:boxlite:check:cc'):
             with self.subTest(target=target):
                 result = subprocess.run(['make', '--no-print-directory', target,
                                          f'PLUGIN_PYTHON={sys.executable}'], cwd=root,
