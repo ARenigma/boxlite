@@ -436,6 +436,7 @@ pub struct BoxState {
 | Connect | `BoxTunnel::connect(self) -> BoxliteResult<BoxConnection>` | Consume the prepared tunnel into its byte stream |
 | Split | `BoxConnection::into_split(self) -> (BoxReader, BoxWriter)` | Halves that read and write concurrently |
 | Half-close | `BoxWriter::shutdown(&mut self) -> BoxliteResult<()>` | Signal EOF; a peer that already hung up is success, not an error |
+| Inbound access | `async fn set_inbound(&self, mode: NetworkMode) -> BoxliteResult<()>` | Make a remote box public (`Enabled`) or private (`Disabled`); `Unsupported` for a local box or a server without `inbound_update_enabled` |
 
 `BoxTunnel` remains one-shot: choose either `connect()` or `forward()`. A
 forwarder privately prepares a fresh tunnel for each later accepted client.
@@ -641,6 +642,9 @@ pub struct BoxOptions {
     /// Volume mounts
     pub volumes: Vec<VolumeSpec>,
 
+    /// Typed mounts, beside `volumes`
+    pub mounts: Vec<MountSpec>,
+
     /// Network policy, per direction
     pub network: NetworkSpec,
 
@@ -801,8 +805,8 @@ The two origins are not interchangeable across runtimes:
 
 ### MountSpec
 
-A typed mount. `BoxOptions` does not take one yet. Where a `VolumeSpec` infers
-its origin from which field is set, a `MountSpec` states it in `mount_type`.
+A typed mount for `BoxOptions::mounts`. Where a `VolumeSpec` infers its origin
+from which field is set, a `MountSpec` states it in `mount_type`.
 
 ```rust
 pub struct MountSpec {
@@ -834,10 +838,19 @@ let prefix = MountSpec {
 let bind = MountSpec::bind_mount("/tmp/data", "/data");
 ```
 
-`MountType` parses from and displays as `"volume"` and `"bind"` exactly. No
-CLI, SDK or REST API carries a `MountSpec` yet.
+`MountType` parses from and displays as `"volume"` and `"bind"` exactly. Only
+the Rust `BoxOptions` carries a `MountSpec`; no CLI flag, other SDK or REST
+request does yet.
 `MountSpec::validate` refuses a relative `target`, a missing `source`,
-`sub_path` on a `Bind`, and an empty `sub_path`.
+`sub_path` on a `Bind`, and an empty `sub_path`; create runs it for every mount.
+A runtime refuses the mounts it does not take rather than dropping them; use
+`volumes` where it takes none:
+
+- REST runtimes take no typed mounts yet.
+
+- The local runtime takes no typed mounts yet.
+
+- Importing an archive that carries mounts is not supported yet.
 
 ### NetworkSpec
 
