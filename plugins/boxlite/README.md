@@ -33,3 +33,11 @@ Claude Code also accepts /boxlite:boxlite-setup and /boxlite:boxlite. Repository
 The optional deploy helper requires host Python 3.9+ and the guest's provided Python 3. It uses the standard library and installs no helper dependencies.
 
 Keep app source, deployment state, credentials and CLI build caches outside this plugin. Online documentation is a conditional reference. This package has no application template, MCP server or lifecycle hook. Its optional helpers manage an app through the existing CLI.
+
+## Privacy and support
+
+BoxLite is provided by Polygala, Inc. See the [privacy policy](https://boxlite.ai/legal/privacy) and [service terms](https://boxlite.ai/legal/terms). Contact [support@boxlite.ai](mailto:support@boxlite.ai) for support and review questions; privacy requests go to [privacy@boxlite.ai](mailto:privacy@boxlite.ai).
+
+The skills send user-selected application files and commands to BoxLite Cloud and use Auth0 for login. The CLI stores the selected profile's credentials locally. The optional deployment helper uses the selected CLI profile and rejects a nonempty BOXLITE_API_KEY environment variable before running commands; it does not forward credentials to an application's registered health URL. Source builds fetch the pinned official GitHub repository and its toolchains. Cloud retention and third-party processing follow the published policy.
+
+Both listing icons use the same 512px square PNG. Claude discovers its icon at .claude-plugin/icon.png; the OpenAI manifests reference assets/boxlite-icon.png. Keep these copies identical when updating the artwork.
