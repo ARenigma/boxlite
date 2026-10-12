@@ -16,5 +16,10 @@
     "deployment",
     "cli",
     "skills"
-  ]
+  ],
+  "displayName": "BoxLite",
+  "supportUrl": "https://boxlite.ai/contact",
+  "privacyPolicyUrl": "https://boxlite.ai/legal/privacy",
+  "termsOfServiceUrl": "https://boxlite.ai/legal/terms",
+  "documentationUrl": "https://docs.boxlite.ai"
 }
