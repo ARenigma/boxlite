@@ -30,5 +30,10 @@
       "Deploy this project to BoxLite and give me its public URL.",
       "Update my BoxLite app and verify the same public URL."
     ]
+  },
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/boxlite-setup/SKILL.md"
+    }
   }
 }
