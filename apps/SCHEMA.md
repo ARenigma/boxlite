@@ -436,6 +436,10 @@ requested `disk`:
   `destroyed`. The expand limit is unset by default and the ratio is `1`.
 - `currentDiskUsagePercentage ≤ 100 − RUNNER_DISK_MIN_FREE_PERCENTAGE` (default `10`).
 
+The API refuses to start on an invalid value: a ratio that is not above `0`,
+an expand limit that is not a whole number of at least `1`, or a free-space
+percentage outside `0` to below `100`.
+
 Allocation comes from `box` rows, not `currentAllocatedDiskGiB`. Selection and
 insert are not locked against each other, so concurrent creates can overshoot
 slightly; the free-space floor bounds that. A box that fits nowhere fails with

@@ -321,6 +321,53 @@ const S3_URI_SCHEME = 's3://'
 const ARCHIVE_PREFIX_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 /**
+ * A decimal setting that must sit in a range. `parseFloat` reads "abc" as NaN
+ * and "10%" as 10; a NaN compares false everywhere, so the setting it controls
+ * would silently stop applying. Refused at boot instead.
+ */
+function boundedNumber(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+  isValid: (n: number) => boolean,
+  range: string,
+): number {
+  const raw = value?.trim()
+  if (!raw) {
+    return fallback
+  }
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || !isValid(parsed)) {
+    throw new Error(`${name} must be ${range}, got "${value}"`)
+  }
+  return parsed
+}
+
+/** Hard disk admission for runner selection; see RunnerService.findAvailableRunners. */
+export function runnerDiskConfig(env: NodeJS.ProcessEnv = process.env) {
+  return {
+    overcommitRatio: boundedNumber(
+      env.RUNNER_DISK_OVERCOMMIT_RATIO,
+      1,
+      'RUNNER_DISK_OVERCOMMIT_RATIO',
+      (n) => n > 0,
+      'a number above 0',
+    ),
+    // What a runner's data disk can grow to. Unset means its reported diskGiB.
+    expandLimitGiB: env.RUNNER_DISK_EXPAND_LIMIT_GIB?.trim()
+      ? requiredCount(env.RUNNER_DISK_EXPAND_LIMIT_GIB, 0, 'RUNNER_DISK_EXPAND_LIMIT_GIB')
+      : undefined,
+    minFreePercentage: boundedNumber(
+      env.RUNNER_DISK_MIN_FREE_PERCENTAGE,
+      10,
+      'RUNNER_DISK_MIN_FREE_PERCENTAGE',
+      (n) => n >= 0 && n < 100,
+      'a percentage from 0 up to (not including) 100',
+    ),
+  }
+}
+
+/**
  * Where a box migration's archive lives in the object store: the prefix the
  * exporting runner writes under and the importing one reads back.
  *
@@ -583,15 +630,7 @@ const configuration = {
       },
     },
   },
-  // Hard disk admission for runner selection; see findAvailableRunners.
-  runnerDisk: {
-    overcommitRatio: parseFloat(process.env.RUNNER_DISK_OVERCOMMIT_RATIO || '1'),
-    // What a runner's data disk can grow to. Unset means its reported diskGiB.
-    expandLimitGiB: process.env.RUNNER_DISK_EXPAND_LIMIT_GIB
-      ? parseInt(process.env.RUNNER_DISK_EXPAND_LIMIT_GIB, 10)
-      : undefined,
-    minFreePercentage: parseFloat(process.env.RUNNER_DISK_MIN_FREE_PERCENTAGE || '10'),
-  },
+  runnerDisk: runnerDiskConfig(),
   rateLimit: {
     anonymous: {
       ttl: process.env.RATE_LIMIT_ANONYMOUS_TTL ? parseInt(process.env.RATE_LIMIT_ANONYMOUS_TTL, 10) : undefined,
