@@ -18,6 +18,7 @@ import { Organization } from '../../organization/entities/organization.entity'
 import { Image } from '../entities/image.entity'
 import { ImageTag } from '../entities/image-tag.entity'
 import { ImageVersion } from '../entities/image-version.entity'
+import { ImageVersionState } from '../enums/image-version-state.enum'
 import { CuratedImagePinService } from './curated-image-pin.service'
 import { ImageCatalogService } from './image-catalog.service'
 import { ImageRegistrarService } from './image-registrar.service'
@@ -143,6 +144,29 @@ describeIfDatabase('ImageCatalogService (integration, real Postgres)', () => {
     expect(references[0].recordedAt).toBeInstanceOf(Date)
   })
 
+  /** A curated image has no recorded build to name, so it lists no reference. */
+  it('lists no reference for an organization that has used no image, though it sees the curated set', async () => {
+    expect((await catalog.list(ORG)).some((image) => image.curated)).toBe(true)
+
+    expect(await catalog.listReferences(ORG)).toEqual([])
+  })
+
+  /**
+   * Only ready versions are read, so a tag can point at a version that is not
+   * ready, and an image can have no ready version at all. Neither may list a
+   * reference to that build.
+   */
+  it('lists no reference to a version that is not ready', async () => {
+    await use('quay.io/acme/app:v1')
+    await use('quay.io/acme/app:v2', { digest: OTHER_DIGEST, sizeBytes: 1024 })
+    await use('quay.io/acme/gone:v1', { digest: OTHER_DIGEST, sizeBytes: 1024 })
+    await dataSource.getRepository(ImageVersion).update({ digest: OTHER_DIGEST }, { state: ImageVersionState.DELETED })
+
+    const references = await catalog.listReferences(ORG)
+
+    expect(references.map(({ reference }) => reference)).toEqual(['quay.io/acme/app:v1'])
+  })
+
   it('lists an image with the tags, version count and size recorded for it', async () => {
     await use('quay.io/acme/app:v1')
     await use('quay.io/acme/app:v2', { digest: OTHER_DIGEST, sizeBytes: 1024 })
@@ -200,6 +224,7 @@ describeIfDatabase('ImageCatalogService (integration, real Postgres)', () => {
     expect(orphanedVersions).toBe(1)
 
     expect(await ownImages()).toEqual([])
+    expect(await catalog.listReferences(ORG)).toEqual([])
     await expect(catalog.get(ORG, 'quay.io/acme/app')).rejects.toThrow(NotFoundException)
     expect(await catalog.usage(ORG)).toMatchObject({ count: 0, knownBytes: 0 })
   })
