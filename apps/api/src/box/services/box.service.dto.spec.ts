@@ -80,6 +80,35 @@ describe('BoxService DTO conversion', () => {
     expect(dto.progress).toBeUndefined()
   })
 
+  it('serves a box list without progress when the preparation read fails', async () => {
+    const boxes = [new Box('us', 'data-loader'), new Box('eu', 'log-shipper')]
+    const service = createService(
+      { getLastActivityAtMany: jest.fn().mockResolvedValue(new Map()) },
+      { imagePreparationService: { preparingImage: jest.fn().mockRejectedValue(new Error('catalog unavailable')) } },
+    )
+
+    const dtos = await service.toBoxDtos(boxes)
+
+    expect(dtos.map((dto) => dto.id)).toEqual(boxes.map((box) => box.id))
+    expect(dtos.map((dto) => dto.progress)).toEqual([undefined, undefined])
+  })
+
+  // One read answers the whole page, so the answer has to land on the box it
+  // is about rather than on every box in the list.
+  it('reports progress in a list only for the boxes still waiting on their image', async () => {
+    const waiting = new Box('us', 'data-loader')
+    const cached = new Box('us', 'log-shipper')
+    const service = createService(
+      { getLastActivityAtMany: jest.fn().mockResolvedValue(new Map()) },
+      { imagePreparationService: preparationReader([waiting]) },
+    )
+
+    const [waitingDto, cachedDto] = await service.toBoxDtos([waiting, cached])
+
+    expect(waitingDto.progress?.phase).toBe(BoxProgressPhase.PREPARING_IMAGE)
+    expect(cachedDto.progress).toBeUndefined()
+  })
+
   it('still fails the conversion when the toolbox proxy URL cannot be resolved', async () => {
     const box = new Box('us', 'data-loader')
     const service = createService({ getLastActivityAt: jest.fn().mockResolvedValue(null) })

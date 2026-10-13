@@ -18,6 +18,7 @@ import { Organization } from '../../organization/entities/organization.entity'
 import { Image } from '../entities/image.entity'
 import { ImageTag } from '../entities/image-tag.entity'
 import { ImageVersion } from '../entities/image-version.entity'
+import { ImageVersionState } from '../enums/image-version-state.enum'
 import { CuratedImagePinService } from './curated-image-pin.service'
 import { ImageCatalogService } from './image-catalog.service'
 import { ImageRegistrarService } from './image-registrar.service'
@@ -162,6 +163,59 @@ describeIfDatabase('ImageCatalogService (integration, real Postgres)', () => {
 
     await expect(catalog.delete(ORG, curated[0].name)).rejects.toThrow(BadRequestError)
     expect((await catalog.usage(ORG)).count).toBe(0)
+  })
+
+  /**
+   * A curated image has no row to look up, so its detail is the listed entry
+   * with nothing recorded under it — reached by either of the two names a
+   * caller knows it by.
+   */
+  it('answers the detail for a curated image by its name and by its reference', async () => {
+    const [curated] = (await catalog.list(ORG)).filter((image) => image.curated)
+
+    for (const idOrRef of [curated.name, curated.curatedRef as string]) {
+      expect(await catalog.get(ORG, idOrRef)).toEqual({ ...curated, versions: [], history: [] })
+    }
+  })
+
+  /**
+   * The route parameter is whatever the caller sent. One that is neither a
+   * catalog id nor a reference names nothing here, which is a 404 — not a
+   * parse error escaping from a read.
+   */
+  it('reports a reference that does not parse as not found', async () => {
+    await use('quay.io/acme/app:v1')
+
+    await expect(catalog.get(ORG, 'quay.io/Acme/App')).rejects.toThrow(NotFoundException)
+    await expect(catalog.delete(ORG, 'quay.io/Acme/App')).rejects.toThrow(NotFoundException)
+    expect(await ownImages()).toHaveLength(1)
+  })
+
+  /**
+   * A digest-pinned reference names no tag, so the registrar records none. The
+   * image still lists and answers, with no tags rather than a missing field.
+   */
+  it('lists and details an image used only by digest with no tags', async () => {
+    await use(`quay.io/acme/app@${DIGEST}`)
+
+    const [listed] = await ownImages()
+    expect(listed).toMatchObject({ name: 'quay.io/acme/app', tags: [], versionCount: 1 })
+    expect((await catalog.get(ORG, 'quay.io/acme/app')).tags).toEqual([])
+  })
+
+  /**
+   * Only a ready version is one a box can boot from, so only those are listed,
+   * sized and summed. Nothing writes another state yet; the row is moved by
+   * hand because the filter is what is under test.
+   */
+  it('leaves a version that is no longer ready out of the size, the detail and the usage', async () => {
+    await use('quay.io/acme/app:v1', { sizeBytes: 4096 })
+    await dataSource.query(`UPDATE "${schemaName}"."image_version" SET "state" = $1`, [ImageVersionState.DELETED])
+
+    const [listed] = await ownImages()
+    expect(listed).toMatchObject({ name: 'quay.io/acme/app', versionCount: 0, sizeBytes: 0 })
+    expect((await catalog.get(ORG, 'quay.io/acme/app')).versions).toEqual([])
+    expect(await catalog.usage(ORG)).toEqual({ count: 1, limit: 20, knownBytes: 0 })
   })
 
   /**

@@ -5,8 +5,12 @@
 
 import type { INestApplication } from '@nestjs/common'
 import { ConflictException } from '@nestjs/common'
+import { Reflector } from '@nestjs/core'
 import { Test } from '@nestjs/testing'
 import type { AddressInfo } from 'net'
+import { AuditAction } from '../../audit/enums/audit-action.enum'
+import { AuditTarget } from '../../audit/enums/audit-target.enum'
+import { AuditInterceptor } from '../../audit/interceptors/audit.interceptor'
 import { CombinedAuthGuard } from '../../auth/combined-auth.guard'
 import { AuthenticatedRateLimitGuard } from '../../common/guards/authenticated-rate-limit.guard'
 import { OrganizationResourceActionGuard } from '../../organization/guards/organization-resource-action.guard'
@@ -23,8 +27,13 @@ describe('ImageController routing', () => {
     delete: jest.Mock
     usage: jest.Mock
   }
+  let audit: { createLog: jest.Mock; updateLog: jest.Mock }
 
   beforeEach(async () => {
+    audit = {
+      createLog: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+      updateLog: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+    }
     catalog = {
       list: jest.fn().mockResolvedValue([]),
       get: jest.fn().mockResolvedValue({ name: 'quay.io/acme/app' }),
@@ -40,6 +49,8 @@ describe('ImageController routing', () => {
       .useValue({
         canActivate: (context: any) => {
           context.switchToHttp().getRequest().user = {
+            userId: 'user-1',
+            email: 'user@example.test',
             organizationId: ORGANIZATION.id,
             organization: ORGANIZATION,
           }
@@ -54,6 +65,9 @@ describe('ImageController routing', () => {
 
     app = moduleRef.createNestApplication()
     app.setGlobalPrefix('api')
+    // Global in main.ts too, so each route's @Audit metadata is read the way
+    // production reads it.
+    app.useGlobalInterceptors(new AuditInterceptor(new Reflector(), audit as never, { get: jest.fn() } as never))
     await app.listen(0)
   })
 
@@ -108,6 +122,24 @@ describe('ImageController routing', () => {
     expect(response.status).toBe(204)
     expect(await response.text()).toBe('')
     expect(catalog.delete).toHaveBeenCalledWith(ORGANIZATION, 'quay.io/acme/app')
+  })
+
+  /**
+   * The audit target is the image the caller named, decoded by the router —
+   * not the percent-encoded segment, which nobody searching the log would type.
+   */
+  it('audits a removal against the reference the caller named', async () => {
+    const response = await request('DELETE', '/api/images/quay.io%2Facme%2Fapp')
+
+    expect(response.status).toBe(204)
+    expect(audit.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: AuditAction.DELETE,
+        targetType: AuditTarget.IMAGE,
+        targetId: 'quay.io/acme/app',
+        organizationId: ORGANIZATION.id,
+      }),
+    )
   })
 
   /**

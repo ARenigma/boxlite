@@ -193,6 +193,34 @@ describeIfDatabase('ImagePreparationService (integration, real Postgres)', () =>
     query.mockRestore()
   })
 
+  /**
+   * A box the runner has not reported on yet is stored as UNKNOWN and reported
+   * as CREATING. This has to gate on the reported state, or a box would show
+   * as creating with no progress while it waited on its first pull.
+   */
+  it('reports a box still stored as unknown, which reads as being created', async () => {
+    const box = creatingBox('quay.io/acme/app:v1')
+    box.state = BoxState.UNKNOWN
+
+    expect(await preparation.preparingImage([box])).toEqual(new Set([box.id]))
+  })
+
+  /**
+   * A stored reference that no longer parses names no catalog row, so there
+   * is nothing to ask about and nothing true to say about its progress.
+   */
+  it('reports nothing for a reference it cannot normalise, and asks the catalog nothing', async () => {
+    const box = creatingBox('quay.io/Acme/App')
+    const versions = dataSource.getRepository(ImageVersion)
+    const query = jest.spyOn(versions, 'createQueryBuilder')
+    const service = new ImagePreparationService(versions)
+
+    expect(await service.preparingImage([box])).toEqual(new Set())
+    expect(query).not.toHaveBeenCalled()
+
+    query.mockRestore()
+  })
+
   it('answers a mixed list in a single query', async () => {
     await use('quay.io/acme/cached:v1')
     const cached = creatingBox('quay.io/acme/cached:v1')
