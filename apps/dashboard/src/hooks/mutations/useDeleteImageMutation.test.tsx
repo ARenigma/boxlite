@@ -46,9 +46,9 @@ function DeleteProbe() {
 }
 
 // Stands in for reopening the image's detail page: the same query, read the
-// same way the page reads it.
-function DetailProbe() {
-  const { data } = useImageQuery('img-1')
+// same way the page reads it. The route takes an id or a reference.
+function DetailProbe({ idOrRef = 'img-1' }: { idOrRef?: string }) {
+  const { data } = useImageQuery(idOrRef)
   return <div data-testid="detail">{data?.name ?? 'none'}</div>
 }
 
@@ -99,11 +99,11 @@ describe('useDeleteImageMutation', () => {
     vi.clearAllMocks()
   })
 
-  async function reopenDetail() {
+  async function reopenDetail(idOrRef?: string) {
     act(() => {
       root?.render(
         <QueryClientProvider client={queryClient}>
-          <DetailProbe />
+          <DetailProbe idOrRef={idOrRef} />
         </QueryClientProvider>,
       )
     })
@@ -126,6 +126,21 @@ describe('useDeleteImageMutation', () => {
 
     expect(await reopenDetail()).toBe('none')
     expect(mocks.getImage).toHaveBeenCalledWith('img-1', 'org-1')
+  })
+
+  // The list removes by id, but a detail page opened from a link may have
+  // cached the same image under its reference.
+  it('does not show a removed image whose detail was opened by reference', async () => {
+    queryClient.setQueryData(queryKeys.images.detail('org-1', 'quay.io/acme/app'), DELETED_IMAGE)
+    mocks.deleteImage.mockResolvedValue(undefined)
+    mocks.getImage.mockRejectedValue(new Error('Image not found'))
+
+    await act(async () => {
+      await deleteImage?.mutateAsync({ idOrRef: 'img-1', organizationId: 'org-1' })
+    })
+
+    expect(await reopenDetail('quay.io/acme/app')).toBe('none')
+    expect(mocks.getImage).toHaveBeenCalledWith('quay.io/acme/app', 'org-1')
   })
 
   it('refreshes the catalog list and the usage count after a removal', async () => {
