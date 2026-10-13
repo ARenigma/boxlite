@@ -18,6 +18,10 @@ export interface DeleteImageMutationVariables {
  * Usage is invalidated alongside the list because the two are separate reads
  * of the same fact: a delete that left the count standing would show a bar
  * that disagrees with the rows under it.
+ *
+ * The image's own detail is removed rather than invalidated: its refetch can
+ * only 404, and a failed refetch keeps the old data, so reopening the page
+ * would go on showing the record that was just deleted.
  */
 export const useDeleteImageMutation = () => {
   const { imageApi } = useApi()
@@ -30,10 +34,11 @@ export const useDeleteImageMutation = () => {
       }
       await imageApi.deleteImage(idOrRef, organizationId)
     },
-    onSuccess: async (_data, { organizationId }) => {
+    onSuccess: async (_data, { idOrRef, organizationId }) => {
       if (!organizationId) {
         return
       }
+      queryClient.removeQueries({ queryKey: queryKeys.images.detail(organizationId, idOrRef) })
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.images.list(organizationId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.images.usage(organizationId) }),
