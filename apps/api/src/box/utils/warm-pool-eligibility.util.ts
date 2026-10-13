@@ -23,14 +23,14 @@ import { CreateBoxDto } from '../dto/create-box.dto'
 export function requiresFreshBox(
   createBoxDto: Pick<
     CreateBoxDto,
-    'networkBlockAll' | 'networkAllowList' | 'runAsUser' | 'workingDir' | 'entrypoint' | 'cmd' | 'secrets'
+    'outboundMode' | 'outboundAllowNet' | 'runAsUser' | 'workingDir' | 'entrypoint' | 'cmd' | 'secrets'
   >,
   organization: { boxLimitedNetworkEgress?: boolean },
 ): boolean {
   // Network policy is applied to the box at create time on the runner.
   const overridesNetworkPolicy =
-    createBoxDto.networkBlockAll !== undefined ||
-    createBoxDto.networkAllowList !== undefined ||
+    createBoxDto.outboundMode !== undefined ||
+    createBoxDto.outboundAllowNet !== undefined ||
     Boolean(organization.boxLimitedNetworkEgress)
 
   // entrypoint, cmd, working_dir and the process user are all decided when the
