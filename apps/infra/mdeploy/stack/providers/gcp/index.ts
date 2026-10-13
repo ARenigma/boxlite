@@ -79,6 +79,7 @@ export const gcpStackProviders = ({
   artifactsBucket,
   volumePrefix,
   managedClickHouse = null,
+  otelOpenapiEnabled = false,
   clickStackConsumer = null,
   notificationChannels = [],
 }: {
@@ -109,6 +110,7 @@ export const gcpStackProviders = ({
    */
   volumePrefix: string
   managedClickHouse?: { url: string; writerSecretArn: string; readerSecretArn: string } | null
+  otelOpenapiEnabled?: boolean
   /** Who may read the ClickHouse reader password; see `clickstack.ts`. */
   clickStackConsumer?: string | null
   notificationChannels?: string[]
@@ -159,6 +161,7 @@ export const gcpStackProviders = ({
         clickStackConsumerProject: project,
         clickStackConsumerAccount: clickStackConsumer,
         managed: managedClickHouse,
+        otelOpenapiEnabled,
         dependsOn: network.ready,
       }),
     mail: gcpMailProvider({ relayHost }),

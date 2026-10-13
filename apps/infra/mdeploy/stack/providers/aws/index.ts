@@ -47,6 +47,7 @@ export const awsStackProviders = ({
   dashboardDomain = null,
   artifactsBucket,
   managedClickHouse,
+  otelOpenapiEnabled = false,
 }: {
   stage: string
   region: string
@@ -63,6 +64,7 @@ export const awsStackProviders = ({
    * and one with `mode: managed` and no endpoint is refused by the provider.
    */
   managedClickHouse: { url: string; writerSecretArn: string; readerSecretArn: string } | null
+  otelOpenapiEnabled?: boolean
 }): StackProviders => {
   /*
    * One DNS adapter for every record this stack writes.
@@ -84,7 +86,7 @@ export const awsStackProviders = ({
     database: ({ network }) => awsDatabaseProvider({ network: binding(network) }),
     cache: ({ network }) => awsCacheProvider({ network: binding(network) }),
     clickhouse: ({ network }) =>
-      awsClickHouseProvider({ network: binding(network), region, managed: managedClickHouse }),
+      awsClickHouseProvider({ network: binding(network), region, managed: managedClickHouse, otelOpenapiEnabled }),
     mail: awsMailProvider({ region, dns }),
     collector: ({ host: where, clickhouse, dependsOn }) =>
       awsCollectorProvider({ host: host(where), clickhouse, dependsOn }),

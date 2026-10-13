@@ -66,6 +66,7 @@ Groups in `mstage.env.json` define what each consumer may receive:
 | Group | Consumer |
 | --- | --- |
 | `deploy` | Resource graph, public hosts, runner fleet and optional integrations |
+| `secret` | Optional marker for JSON secret references delivered to workloads |
 | `pulumi` | State passphrase input |
 | `api` | API runtime secrets and optional API integrations |
 | `proxy` | Proxy authentication and telemetry settings |
