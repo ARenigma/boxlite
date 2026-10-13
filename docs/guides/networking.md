@@ -64,7 +64,8 @@ service URL. Inbound access is disabled unless the box was created with
 `boxlite update BOX --inbound enabled`, or with the **Inbound access** switch in
 the dashboard's box network section. `boxlite inspect BOX`,
 `box.info().network`, and the dashboard's `outbound` and `inbound` rows report
-both directions of a remote box's policy.
+both directions of a remote box's policy. With inbound access enabled, the
+dashboard's **get url** returns the same URL as `boxlite network tunnel`.
 
 Image `EXPOSE` declarations are metadata only and never create host listeners.
 
