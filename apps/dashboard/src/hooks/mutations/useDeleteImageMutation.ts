@@ -19,9 +19,12 @@ export interface DeleteImageMutationVariables {
  * of the same fact: a delete that left the count standing would show a bar
  * that disagrees with the rows under it.
  *
- * The image's own detail is removed rather than invalidated: its refetch can
- * only 404, and a failed refetch keeps the old data, so reopening the page
- * would go on showing the record that was just deleted.
+ * Cached details are removed rather than invalidated: the deleted image's
+ * refetch can only 404, and a failed refetch keeps the old data, so reopening
+ * the page would go on showing the record that was just deleted. Every detail
+ * of the organization goes, because the page may have cached this image under
+ * its reference while the list removes it by id; the others are read again
+ * when next opened.
  */
 export const useDeleteImageMutation = () => {
   const { imageApi } = useApi()
@@ -34,11 +37,11 @@ export const useDeleteImageMutation = () => {
       }
       await imageApi.deleteImage(idOrRef, organizationId)
     },
-    onSuccess: async (_data, { idOrRef, organizationId }) => {
+    onSuccess: async (_data, { organizationId }) => {
       if (!organizationId) {
         return
       }
-      queryClient.removeQueries({ queryKey: queryKeys.images.detail(organizationId, idOrRef) })
+      queryClient.removeQueries({ queryKey: queryKeys.images.details(organizationId) })
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.images.list(organizationId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.images.usage(organizationId) }),
