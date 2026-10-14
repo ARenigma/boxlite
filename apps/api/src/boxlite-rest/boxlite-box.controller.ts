@@ -20,11 +20,15 @@ import {
   ValidationPipe,
   Logger,
   Res,
+  ForbiddenException,
 } from '@nestjs/common'
 import { ApiTags, ApiBearerAuth, ApiResponse, ApiExcludeController } from '@nestjs/swagger'
 import { Response } from 'express'
 import { CombinedAuthGuard } from '../auth/combined-auth.guard'
-import { OrganizationResourceActionGuard } from '../organization/guards/organization-resource-action.guard'
+import {
+  OrganizationResourceActionGuard,
+  hasOrganizationResourcePermissions,
+} from '../organization/guards/organization-resource-action.guard'
 import { RequiredOrganizationResourcePermissions } from '../organization/decorators/required-organization-resource-permissions.decorator'
 import { OrganizationResourcePermission } from '../organization/enums/organization-resource-permission.enum'
 import { AuthContext } from '../common/decorators/auth-context.decorator'
@@ -75,6 +79,7 @@ export class BoxliteBoxController {
   ) {}
 
   @Post()
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @HttpCode(201)
   @ApiResponse({
     status: 201,
@@ -116,6 +121,14 @@ export class BoxliteBoxController {
     @AuthContext() authContext: OrganizationAuthContext,
     @Body() dto: CreateBoxDto,
   ): Promise<BoxResponseDto> {
+    // Attaching a managed volume grants the box read/write access to its data,
+    // so it is authorized independently of WRITE_BOXES: the caller must hold the
+    // volume permissions too. WRITE_BOXES alone must not reach another key's
+    // volumes (GHSA-2qqv-7cwv-mj8h).
+    if (dto.volumes?.length) {
+      this.assertCanAttachVolumes(authContext)
+    }
+
     const organization = authContext.organization
     const createBoxDto = createBoxToCreateBox(dto)
     const maxCreatedBoxes = await this.commerceBoxLimitService.resolveMaxCreatedBoxes(organization.id)
@@ -125,6 +138,17 @@ export class BoxliteBoxController {
       box = await this.boxStateWaiter.waitForStarted(box.id, organization.id, 30)
     }
     return boxToBoxResponse(box)
+  }
+
+  // Mirrors OrganizationResourceActionGuard: a system admin and an interactive
+  // owner without an API key are not permission-bounded; every other caller is
+  // bounded by the permissions its credential carries. A static route decorator
+  // cannot express this because it applies only when volumes are requested.
+  private assertCanAttachVolumes(authContext: OrganizationAuthContext): void {
+    const required = [OrganizationResourcePermission.READ_VOLUMES, OrganizationResourcePermission.WRITE_VOLUMES]
+    if (!hasOrganizationResourcePermissions(authContext, required)) {
+      throw new ForbiddenException(`Attaching a managed volume requires: ${required.join(', ')}`)
+    }
   }
 
   @Get()
@@ -174,6 +198,7 @@ export class BoxliteBoxController {
   }
 
   @Delete(':boxId')
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.DELETE_BOXES])
   @HttpCode(204)
   @Audit({
     action: AuditAction.DELETE,
@@ -185,6 +210,7 @@ export class BoxliteBoxController {
   }
 
   @Post(':boxId/start')
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @ApiResponse({
     status: 201,
     description: 'Box start requested',
@@ -216,6 +242,7 @@ export class BoxliteBoxController {
   }
 
   @Post(':boxId/stop')
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @ApiResponse({
     status: 201,
     description: 'Box stop requested',
