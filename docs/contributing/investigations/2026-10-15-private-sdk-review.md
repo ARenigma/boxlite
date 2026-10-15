@@ -1,6 +1,7 @@
 ## TL;DR
 
-Reject unrepresentable registry responses before C callbacks report success, and retain E2E cleanup records until deletion succeeds.
+Preserve registry and cleanup contracts, and collect native SDK coverage from one
+consistent build directory.
 
 ## Details
 
@@ -34,3 +35,64 @@ the E2E regression recorded only the initial deletion, missing teardown's retry.
 After the fix, both pass. The FFI suite passes with 105 tests and one skipped;
 the Node binding suite passes with 35 tests. No live private registry or VM was
 used for these focused regressions.
+
+## Follow-up review: native coverage paths
+
+The newer #1956 review repeats the cleanup and Node Debug findings, already fixed
+in the final stack part at `96211d4e` and covered by `23fbfbd1`. It also identifies
+a separate coverage-path defect. Keep these corrections in the existing final
+stack part, with no registry behavior changes.
+
+### Evidence and alternatives
+
+`scripts/test/coverage-bindings.sh` exports a caller-supplied `CARGO_TARGET_DIR`
+before invoking Python and Node builds from their SDK directories. The report
+command runs at the repository root. Cargo resolves environment-variable paths
+against each command's working directory, per
+[config-relative paths](https://doc.rust-lang.org/cargo/reference/config.html#config-relative-paths).
+Consequently a relative override can put native objects outside the directory
+the reporter scans.
+
+The installed cargo-llvm-cov 0.9.1 `show-env --sh` makes
+`CARGO_LLVM_COV_TARGET_DIR` absolute but does not replace `CARGO_TARGET_DIR`.
+Relying on that command to normalize both values therefore leaves the defect.
+Resolve relative overrides against the collector's repository root before
+`show-env` and every SDK build. Preserve absolute overrides and the existing
+default; concatenation avoids requiring the destination to exist or adding a
+platform-specific canonicalization tool.
+
+Two other review notes need small contract clarifications. `ImageTagEvent.Actor`
+in `sdks/go/images.go` already documents the empty string for pull-recorded events;
+state that value explicitly in the README. For the registry backend trait,
+check the lint before retaining an override. Rust's
+[expect attribute](https://doc.rust-lang.org/reference/attributes/diagnostics.html#the-expect-attribute)
+reports an obsolete suppression, matching the repository's Rust style guide.
+The installed compiler rejects the suggested replacement as an unfulfilled
+`clippy::double_must_use` expectation. Remove the stale suppression entirely
+instead of adding another override to hide that result.
+
+### Approach and validation
+
+Estimated production addition: under 20 lines, excluding tests and meaningful
+documentation. Add a standalone coverage-script unit suite and run it before
+external coverage collection. Invoke the actual collector in an isolated tree
+with stubbed build tools: builders resolve target paths from their SDK working
+directories, and the reporter checks that their objects are present together.
+
+First retain only the tests and observe the relative-path case fail because the
+reporter cannot find Python and Node objects. The default and absolute-path cases
+must pass. Restore the complete fix and rerun all cases, including a path with
+spaces. Check shell syntax, ShellCheck when available, Rust formatting and the
+unsuppressed registry trait. Existing cleanup and password-redaction regressions
+must continue to pass. These checks exercise orchestration, not a fresh native
+coverage measurement or VM run.
+
+### Follow-up verification
+
+With every non-test file restored to `4e27dd8a`, the relative-path case failed
+with missing Python and Node objects; the default and absolute-path cases passed.
+Restoring the fix passed all three cases.
+
+Bash syntax, ShellCheck, Python formatting/lint, Rust formatting, and workspace
+Clippy passed. Clippy used Python 3.14, supported by the installed PyO3. The
+existing cleanup-retry and credential-redaction regressions also passed.
