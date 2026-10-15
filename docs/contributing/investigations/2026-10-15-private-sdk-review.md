@@ -67,9 +67,11 @@ state that value explicitly in the README. For the registry backend trait,
 check the lint before retaining an override. Rust's
 [expect attribute](https://doc.rust-lang.org/reference/attributes/diagnostics.html#the-expect-attribute)
 reports an obsolete suppression, matching the repository's Rust style guide.
-The installed compiler rejects the suggested replacement as an unfulfilled
-`clippy::double_must_use` expectation. Remove the stale suppression entirely
-instead of adding another override to hide that result.
+Local Clippy 1.97.1 does not emit this macro-generated lint and rejects `expect`
+as unfulfilled. CI uses Rust 1.99.1 and does emit it: removing the suppression
+fails with three `clippy::double_must_use` errors. Use the requested `expect`
+with its existing reason and validate with Clippy 1.99, matching CI's toolchain.
+Normal builds retain the repository's existing Rust minimum version.
 
 ### Approach and validation
 
@@ -83,8 +85,8 @@ First retain only the tests and observe the relative-path case fail because the
 reporter cannot find Python and Node objects. The default and absolute-path cases
 must pass. Restore the complete fix and rerun all cases, including a path with
 spaces. Check shell syntax, ShellCheck when available, Rust formatting and the
-unsuppressed registry trait. Existing cleanup and password-redaction regressions
-must continue to pass. These checks exercise orchestration, not a fresh native
+registry expectation using a CI-compatible Clippy. Existing cleanup and
+password-redaction regressions must continue to pass. These checks exercise orchestration, not a fresh native
 coverage measurement or VM run.
 
 ### Follow-up verification
@@ -93,6 +95,6 @@ With every non-test file restored to `4e27dd8a`, the relative-path case failed
 with missing Python and Node objects; the default and absolute-path cases passed.
 Restoring the fix passed all three cases.
 
-Bash syntax, ShellCheck, Python formatting/lint, Rust formatting, and workspace
-Clippy passed. Clippy used Python 3.14, supported by the installed PyO3. The
-existing cleanup-retry and credential-redaction regressions also passed.
+Bash syntax, ShellCheck, Python formatting/lint, Rust formatting, and the
+cleanup-retry and credential-redaction regressions passed. The registry crate
+passes Clippy 1.99.0 with the final expectation, matching CI's 1.99 diagnostic.
