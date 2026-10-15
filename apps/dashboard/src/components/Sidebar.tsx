@@ -36,7 +36,6 @@ import {
   MoonIcon,
   MoreHorizontal,
   SunIcon,
-  Users,
 } from '@/components/ui/icon'
 import { usePostHog } from 'posthog-js/react'
 import { useCallback } from 'react'
@@ -265,14 +264,6 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
               <Link to={RoutePath.SETTINGS}>
                 <Building2 className="size-4" />
                 Organization
-              </Link>
-            </DropdownMenuItem>
-          )}
-          {selectedOrganization && (
-            <DropdownMenuItem asChild className="cursor-pointer">
-              <Link to={RoutePath.MEMBERS}>
-                <Users className="size-4" />
-                Members
               </Link>
             </DropdownMenuItem>
           )}

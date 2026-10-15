@@ -44,7 +44,6 @@ const BillingPlanChange = React.lazy(() => import('./pages/BillingPlanChange'))
 const Volumes = React.lazy(() => import('./pages/Volumes'))
 const EmailVerify = React.lazy(() => import('./pages/EmailVerify'))
 const OrganizationSettings = React.lazy(() => import('@/pages/OrganizationSettings'))
-const OrganizationMembers = React.lazy(() => import('@/pages/OrganizationMembers'))
 const UserOrganizationInvitations = React.lazy(() => import('@/pages/UserOrganizationInvitations'))
 const BoxDetails = React.lazy(() => import('./components/boxes').then((m) => ({ default: m.BoxDetails })))
 const BoxTerminalFullscreen = React.lazy(() =>
@@ -219,7 +218,10 @@ function App() {
         ))}
         <Route path={getRouteSubPath(RoutePath.EMAIL_VERIFY)} element={<EmailVerify />} />
         <Route path={getRouteSubPath(RoutePath.SETTINGS)} element={<OrganizationSettings />} />
-        <Route path={getRouteSubPath(RoutePath.MEMBERS)} element={<OrganizationMembers />} />
+        <Route
+          path={getRouteSubPath(RoutePath.MEMBERS)}
+          element={<Navigate to={`${RoutePath.SETTINGS}?tab=member`} replace />}
+        />
         <Route path={getRouteSubPath(RoutePath.USER_INVITATIONS)} element={<UserOrganizationInvitations />} />
         <Route
           path={getRouteSubPath(RoutePath.ONBOARDING)}
