@@ -204,16 +204,7 @@ impl ApiClient {
         // connection, a corrupt compressed body — never an internal bug.
         let bytes = resp.bytes().await.map_err(transport_error)?;
         serde_json::from_slice::<T>(&bytes).map_err(|e| {
-            let preview = String::from_utf8_lossy(&bytes);
-            let preview = if preview.len() > 4096 {
-                format!(
-                    "{}… (truncated, {} bytes total)",
-                    &preview[..4096],
-                    bytes.len()
-                )
-            } else {
-                preview.into_owned()
-            };
+            let preview = body_preview(&bytes);
             BoxliteError::Internal(format!(
                 "failed to parse response: {} \n--- response body ({} bytes) ---\n{}\n--- end ---",
                 e,
@@ -673,6 +664,20 @@ fn ensure_capability(name: &str, enabled: Option<bool>) -> BoxliteResult<()> {
     }
 }
 
+/// First 4 KiB of a response body for an error message.
+fn body_preview(body: &[u8]) -> String {
+    if body.len() > 4096 {
+        // Cut the bytes, not the decoded string: a split char becomes U+FFFD instead of panicking.
+        format!(
+            "{}… (truncated, {} bytes total)",
+            String::from_utf8_lossy(&body[..4096]),
+            body.len()
+        )
+    } else {
+        String::from_utf8_lossy(body).into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ensure_capability;
@@ -685,6 +690,20 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn body_preview_truncates_inside_a_multibyte_char_without_panicking() {
+        // 4095 ASCII bytes then '€' (3 bytes): byte 4096 falls inside it.
+        let body = format!("{}€tail", "a".repeat(4095));
+        let preview = body_preview(body.as_bytes());
+        assert!(preview.starts_with(&"a".repeat(4095)));
+        assert!(preview.contains(&format!("(truncated, {} bytes total)", body.len())));
+    }
+
+    #[test]
+    fn body_preview_keeps_a_short_body_whole() {
+        assert_eq!(body_preview("héllo".as_bytes()), "héllo");
+    }
 
     async fn serve_response_body_on_signal(
         listener: TcpListener,

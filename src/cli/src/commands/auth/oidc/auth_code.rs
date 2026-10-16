@@ -169,16 +169,7 @@ where
     use openidconnect::RequestTokenError as E;
     match err {
         E::Parse(parse_err, body) => {
-            let preview = String::from_utf8_lossy(&body);
-            let preview = if preview.len() > 4096 {
-                format!(
-                    "{}… (truncated, {} bytes total)",
-                    &preview[..4096],
-                    body.len()
-                )
-            } else {
-                preview.into_owned()
-            };
+            let preview = body_preview(&body);
             anyhow!(
                 "token endpoint returned a body openidconnect could not parse: {parse_err}\n\
                  --- response body ({} bytes) ---\n{preview}\n--- end ---",
@@ -339,9 +330,37 @@ const FAILURE_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
+/// First 4 KiB of a response body for an error message.
+fn body_preview(body: &[u8]) -> String {
+    if body.len() > 4096 {
+        // Cut the bytes, not the decoded string: a split char becomes U+FFFD instead of panicking.
+        format!(
+            "{}… (truncated, {} bytes total)",
+            String::from_utf8_lossy(&body[..4096]),
+            body.len()
+        )
+    } else {
+        String::from_utf8_lossy(body).into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_preview_truncates_inside_a_multibyte_char_without_panicking() {
+        // 4095 ASCII bytes then '€' (3 bytes): byte 4096 falls inside it.
+        let body = format!("{}€tail", "a".repeat(4095));
+        let preview = body_preview(body.as_bytes());
+        assert!(preview.starts_with(&"a".repeat(4095)));
+        assert!(preview.contains(&format!("(truncated, {} bytes total)", body.len())));
+    }
+
+    #[test]
+    fn body_preview_keeps_a_short_body_whole() {
+        assert_eq!(body_preview("héllo".as_bytes()), "héllo");
+    }
 
     /// The chosen port must round-trip into the redirect URI we hand the
     /// IdP — a mismatch here is what causes Dex to silently reject the
