@@ -4,7 +4,13 @@
  */
 
 import { BadRequestError } from '../../exceptions/bad-request.exception'
-import { assertHostIsAllowed, imageRegistryAllowlist, isCuratedSelector, parseImageRef } from './image-ref.util'
+import {
+  assertHostIsAllowed,
+  catalogNameOf,
+  imageRegistryAllowlist,
+  isCuratedSelector,
+  parseImageRef,
+} from './image-ref.util'
 
 describe('image ref utilities', () => {
   const savedEnv = { ...process.env }
@@ -48,6 +54,45 @@ describe('image ref utilities', () => {
       ['overlong', `docker.io/acme/${'a'.repeat(600)}`],
     ])('rejects %s', (_label, ref) => {
       expect(() => parseImageRef(ref)).toThrow(BadRequestError)
+    })
+  })
+
+  describe('catalogNameOf', () => {
+    /**
+     * The registrar writes under this name and the catalog, the resolver and the
+     * delete guard all look up by it, so every spelling of one image has to
+     * reach the same key — including the short form that is not even a prefix
+     * of it.
+     */
+    it.each([
+      ['acme/app', 'docker.io/acme/app'],
+      ['acme/app:v1', 'docker.io/acme/app'],
+      [`acme/app@sha256:${'a'.repeat(64)}`, 'docker.io/acme/app'],
+      ['python', 'docker.io/library/python'],
+      ['quay.io/acme/app:v1', 'quay.io/acme/app'],
+    ])('names %s as %s', (ref, expected) => {
+      expect(catalogNameOf(ref)).toBe(expected)
+    })
+
+    it.each([
+      ['undefined', undefined],
+      ['null', null],
+      ['empty', ''],
+    ])('names nothing for %s', (_label, ref) => {
+      expect(catalogNameOf(ref)).toBeUndefined()
+    })
+
+    /**
+     * Its callers are readers comparing a stored reference against a catalog
+     * row. A stored reference that no longer parses is not the image being
+     * asked about, and throwing would turn that answer into a failed read.
+     */
+    it.each([
+      ['an uppercase repository', 'docker.io/Acme/App'],
+      ['surrounding whitespace', ' acme/app'],
+      ['a short digest', 'acme/app@sha256:deadbeef'],
+    ])('names nothing, rather than throwing, for %s', (_label, ref) => {
+      expect(catalogNameOf(ref)).toBeUndefined()
     })
   })
 
