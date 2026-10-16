@@ -122,35 +122,34 @@ impl LockManager for FileLockManager {
     fn allocate(&self) -> BoxliteResult<LockId> {
         let _guard = self.alloc_lock.lock().unwrap();
 
-        // Find next available ID
-        let id = self.next_available_id();
-        let path = self.lock_path(id);
+        loop {
+            let id = self.next_available_id();
+            let path = self.lock_path(id);
 
-        // Create lock file with O_EXCL to atomically check and create
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    // Race condition - try again
-                    BoxliteError::Internal(format!("lock file already exists: {}", path.display()))
-                } else {
-                    BoxliteError::Storage(format!(
+            // O_EXCL makes the file itself the cross-process claim on the ID.
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    self.allocated.write().unwrap().insert(id);
+                    return Ok(id);
+                }
+                // Another process took this ID; record it and try the next one.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    self.allocated.write().unwrap().insert(id);
+                }
+                Err(e) => {
+                    return Err(BoxliteError::Storage(format!(
                         "failed to create lock file {}: {}",
                         path.display(),
                         e
-                    ))
+                    )));
                 }
-            })?;
-
-        drop(file);
-
-        // Track allocation
-        self.allocated.write().unwrap().insert(id);
-
-        Ok(id)
+            }
+        }
     }
 
     fn retrieve(&self, id: LockId) -> BoxliteResult<Arc<dyn Locker>> {
@@ -338,6 +337,19 @@ mod tests {
         let lock_dir = temp_dir.path().join("locks");
         let manager = FileLockManager::new(&lock_dir).expect("create manager");
         (manager, temp_dir)
+    }
+
+    #[test]
+    fn test_allocate_skips_id_taken_by_another_manager() {
+        let temp_dir = TempDir::new().unwrap();
+        let a = FileLockManager::new(temp_dir.path()).unwrap();
+        let b = FileLockManager::new(temp_dir.path()).unwrap();
+
+        let id_a = a.allocate().unwrap();
+        let id_b = b.allocate().unwrap();
+
+        assert_ne!(id_a, id_b);
+        assert!(b.lock_path(id_b).exists());
     }
 
     #[test]
