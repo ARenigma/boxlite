@@ -61,7 +61,7 @@ Resolve relative overrides against the collector's repository root before
 default; concatenation avoids requiring the destination to exist or adding a
 platform-specific canonicalization tool.
 
-Two other review notes need small contract clarifications. `ImageTagEvent.Actor`
+Two other review notes need small contract clarifications. `ImageAliasEvent.Actor`
 in `sdks/go/images.go` already documents the empty string for pull-recorded events;
 state that value explicitly in the README. For the registry backend trait,
 check the lint before retaining an override. Rust's
