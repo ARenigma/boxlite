@@ -24,6 +24,7 @@ const { passThrough } = vi.hoisted(() => ({
 vi.mock('./providers/ApiProvider', () => ({ ApiProvider: passThrough }))
 vi.mock('@/providers/OrganizationsProvider', () => ({ OrganizationsProvider: passThrough }))
 vi.mock('@/providers/SelectedOrganizationProvider', () => ({ SelectedOrganizationProvider: passThrough }))
+vi.mock('@/providers/UserOrganizationInvitationsProvider', () => ({ UserOrganizationInvitationsProvider: passThrough }))
 vi.mock('./providers/RegionsProvider', () => ({ RegionsProvider: passThrough }))
 vi.mock('@/providers/NotificationSocketProvider', () => ({ NotificationSocketProvider: passThrough }))
 vi.mock('./providers/BoxSessionProvider', () => ({ BoxSessionProvider: passThrough }))
@@ -90,6 +91,6 @@ describe('App routes', () => {
   })
 
   it('still bounces a hidden route to the box list', async () => {
-    expect(await renderAt('/dashboard/members')).toBe('boxes page at /dashboard/boxes')
+    expect(await renderAt('/dashboard/roles')).toBe('boxes page at /dashboard/boxes')
   })
 })

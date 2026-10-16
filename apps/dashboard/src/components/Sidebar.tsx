@@ -17,16 +17,20 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { BOXLITE_DOCS_URL, BOXLITE_SLACK_URL } from '@/constants/ExternalLinks'
 import { Theme, useTheme } from '@/contexts/ThemeContext'
 import { RoutePath } from '@/enums/RoutePath'
+import { useOrganizations } from '@/hooks/useOrganizations'
 import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
+import { useUserOrganizationInvitations } from '@/hooks/useUserOrganizationInvitations'
 import { markJustLoggedOut } from '@/lib/auth-session'
 import { ONBOARDING_OPEN_EVENT } from '@/lib/onboarding-progress'
 import { cn } from '@/lib/utils'
 import {
   BookOpen,
   Building2,
+  Check,
   ChevronDown,
   KeyRound,
   LogOut,
+  Mail,
   MessageCircle,
   Monitor,
   MoonIcon,
@@ -101,7 +105,7 @@ function ThemeMenuItems({ theme, setTheme }: { theme: Theme; setTheme: (theme: T
  * Top navigation bar (ASCII/terminal restyle). Named `Sidebar` for import compatibility;
  * it has always rendered as a top header. All data/command wiring is preserved — only the
  * presentation matches the new design (Nav.dc): a single 60px monospace bar with bordered
- * segments, a standalone organization switcher, and a profile menu.
+ * segments and a profile menu, which holds the organization switcher.
  */
 export function Sidebar({ isBannerVisible }: SidebarProps) {
   const posthog = usePostHog()
@@ -109,7 +113,9 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
   const { user, signoutRedirect } = useAuth()
   const { pathname } = useLocation()
   const navigate = useNavigate()
-  const { selectedOrganization } = useSelectedOrganization()
+  const { selectedOrganization, onSelectOrganization } = useSelectedOrganization()
+  const { organizations } = useOrganizations()
+  const { count: pendingInvitationCount } = useUserOrganizationInvitations()
 
   const primaryItems: NavItem[] = PRIMARY_NAV_ITEMS
 
@@ -228,6 +234,33 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
           <DropdownMenuSeparator />
           <ThemeMenuItems theme={theme} setTheme={setTheme} />
           <DropdownMenuSeparator />
+          {/* The selection persists in localStorage, so the chosen organization opens on the next login. */}
+          {organizations.length > 1 && (
+            <>
+              <DropdownMenuLabel className="font-mono text-label font-normal uppercase tracking-[0.18em] text-muted-foreground">
+                Organizations
+              </DropdownMenuLabel>
+              {organizations.map((organization) => {
+                const isSelected = organization.id === selectedOrganization?.id
+                return (
+                  <DropdownMenuItem
+                    key={organization.id}
+                    className="cursor-pointer"
+                    onClick={() => {
+                      if (!isSelected) void onSelectOrganization(organization.id)
+                    }}
+                  >
+                    <Check className={cn('size-4', isSelected ? 'opacity-100' : 'opacity-0')} />
+                    <span className="truncate">{organization.name}</span>
+                    {organization.isDefaultForAuthenticatedUser && (
+                      <span className="ml-auto text-meta text-muted-foreground">Personal</span>
+                    )}
+                  </DropdownMenuItem>
+                )
+              })}
+              <DropdownMenuSeparator />
+            </>
+          )}
           {selectedOrganization && (
             <DropdownMenuItem asChild className="cursor-pointer">
               <Link to={RoutePath.SETTINGS}>
@@ -236,6 +269,17 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
               </Link>
             </DropdownMenuItem>
           )}
+          <DropdownMenuItem asChild className="cursor-pointer">
+            <Link to={RoutePath.USER_INVITATIONS}>
+              <Mail className="size-4" />
+              Invitations
+              {pendingInvitationCount > 0 && (
+                <span className="ml-auto bg-brand px-1.5 text-meta font-semibold text-white">
+                  {pendingInvitationCount}
+                </span>
+              )}
+            </Link>
+          </DropdownMenuItem>
           <DropdownMenuItem asChild className="cursor-pointer">
             <a href={BOXLITE_DOCS_URL} target="_blank" rel="noopener noreferrer">
               <BookOpen className="size-4" />
