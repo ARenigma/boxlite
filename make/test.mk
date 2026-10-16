@@ -422,6 +422,9 @@ test\:unit\:openapi:
 	@echo "🧪 Running OpenAPI reference-server unit tests..."
 	@python3 -m unittest discover -s openapi/reference-server/tests -p 'test_error*.py' -v
 
+test\:unit\:scripts:
+	@python3 -m unittest discover -s tests/scripts -p 'test_*.py' -v
+
 # CLI integration tests.
 test\:integration\:cli: $(if $(SETUP_DONE),,runtime\:debug)
 	@echo "🧪 Running CLI integration tests..."
@@ -490,7 +493,7 @@ test\:unit\:c:
 	@echo "🧪 Running C SDK unit tests..."
 	@$(MAKE) dev:c
 	@mkdir -p sdks/c/tests/build
-	@cd sdks/c/tests/build && cmake ..
+	@cd sdks/c/tests/build && cmake .. -DBOXLITE_LIB_DIR="$(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/debug"
 	@cd sdks/c/tests/build && cmake --build . -j
 	@cd sdks/c/tests/build && ctest --verbose --output-on-failure -L unit $(CTEST_FILTER)
 
@@ -499,7 +502,7 @@ test\:integration\:c:
 	@echo "🧪 Running C SDK integration tests (requires VM)..."
 	@$(MAKE) dev:c
 	@mkdir -p sdks/c/tests/build
-	@cd sdks/c/tests/build && cmake ..
+	@cd sdks/c/tests/build && cmake .. -DBOXLITE_LIB_DIR="$(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/debug"
 	@cd sdks/c/tests/build && cmake --build . -j
 	@cd sdks/c/tests/build && ctest --verbose --output-on-failure -L integration $(CTEST_FILTER)
 
@@ -552,6 +555,10 @@ test\:apps\:infra-config: _ensure-apps-deps _ensure-infra-deps
 	@echo "🧪 Installing and type-checking the SST deployment config..."
 	@cd apps/infra && IAM_PERMISSIONS_BOUNDARY_STAGE=ci npm run sst -- install --stage ci
 	@cd apps/infra && npm run typecheck
+
+test\:apps\:api: _ensure-apps-deps
+	@echo "🧪 Running API unit tests..."
+	@cd apps && yarn nx run api:test --runInBand $(if $(FILTER),--testNamePattern '$(FILTER)',)
 
 test\:apps: _ensure-apps-deps dev\:go
 	@echo "🧪 Running apps workspace test matrix..."

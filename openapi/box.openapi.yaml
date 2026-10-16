@@ -23,6 +23,17 @@ info:
     transfer, service tunnels, and image management as a multi-tenant
     service.
 
+    ## Image API migration (breaking change)
+
+    The image catalog replaces the former pull and digest-ID operations.
+    `POST /{prefix}/images/pull` and `HEAD /{prefix}/images/{image_id}` are
+    removed. Create a box with an image reference to pull it. Replace the
+    former `GET /{prefix}/images/{image_id}` with
+    `GET /{prefix}/images/{image_name}`, using the URL-encoded registry and
+    repository as one path segment. The response is now ImageDetail with
+    versions; inspect their digests to check for a particular build.
+    Regenerate clients from this specification before upgrading servers.
+
     ## Design Principles
 
     This specification follows industry-standard HTTP API patterns:
@@ -134,6 +145,8 @@ tags:
     description: Container image management
   - name: Volumes
     description: Managed persistent volumes
+  - name: Registries
+    description: Logins the server pulls private images with
 
 # ===========================================================================
 # Paths
@@ -1150,83 +1163,210 @@ paths:
   # -------------------------------------------------------------------------
   # Images
   # -------------------------------------------------------------------------
-  /{prefix}/images/pull:
-    parameters:
-      - $ref: "#/components/parameters/prefix"
-    post:
-      operationId: pullImage
-      summary: Pull a container image
-      description: |
-        Pulls a container image from a registry and caches it locally.
-        Returns 200 with image info when the pull completes.
-      tags: [Images]
-      parameters:
-        - $ref: "#/components/parameters/idempotencyKey"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PullImageRequest"
-      responses:
-        "200":
-          description: Image pulled and cached
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ImageInfo"
-        "422":
-          $ref: "#/components/responses/UnprocessableEntityError"
-
   /{prefix}/images:
     parameters:
       - $ref: "#/components/parameters/prefix"
     get:
       operationId: listImages
-      summary: List cached images
-      description: Returns a paginated list of locally cached container images.
+      summary: List images
+      description: |
+        The images this deployment can boot from, one entry per reference:
+        each tag at the build it points to, and each build no tag points to
+        by its digest. A single-host server answers from its image cache; a
+        server shared between callers answers from the caller's catalog. A
+        server may answer every entry at once, leaving `next_page_token` out.
       tags: [Images]
       parameters:
         - $ref: "#/components/parameters/pageSize"
         - $ref: "#/components/parameters/pageToken"
       responses:
         "200":
-          description: List of cached images
+          description: Images the caller can boot from
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListImagesResponse"
 
-  /{prefix}/images/{image_id}:
+  /{prefix}/images/usage:
     parameters:
       - $ref: "#/components/parameters/prefix"
-      - $ref: "#/components/parameters/imageId"
-
     get:
-      operationId: getImage
-      summary: Get image details
-      description: Returns metadata for a cached image by its manifest digest.
+      operationId: getImageUsage
+      summary: Get image usage
+      description: |
+        How many images the routing slot holds against the most it may hold.
+        A server with no such limit answers `UnsupportedError`.
       tags: [Images]
       responses:
         "200":
-          description: Image details
+          description: Images held and the limit
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ImageInfo"
+                $ref: "#/components/schemas/ImageUsage"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+
+  /{prefix}/images/{image_name}:
+    parameters:
+      - $ref: "#/components/parameters/prefix"
+      - $ref: "#/components/parameters/imageName"
+
+    get:
+      operationId: getImage
+      summary: Get an image
+      description: Every build held under an image name.
+      tags: [Images]
+      responses:
+        "200":
+          description: The image and its builds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageDetail"
         "404":
           $ref: "#/components/responses/NotFoundError"
 
-    head:
-      operationId: imageExists
-      summary: Check if an image is cached
-      description: Returns 204 if the image exists in the local cache, 404 if not.
+    delete:
+      operationId: removeImage
+      summary: Remove an image
+      description: |
+        Stop holding an image name, every tag of it. Layers are not deleted.
+        A server refuses with `InvalidStateError` while a box can still boot
+        from the image.
       tags: [Images]
       responses:
         "204":
-          description: Image exists
+          description: The image is no longer held
+        "400":
+          $ref: "#/components/responses/BadRequestError"
         "404":
-          description: Image not found
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+
+  /{prefix}/images/{image_name}/tags/{tag}:
+    parameters:
+      - $ref: "#/components/parameters/prefix"
+      - $ref: "#/components/parameters/imageName"
+      - $ref: "#/components/parameters/imageTag"
+
+    put:
+      operationId: moveImageTag
+      summary: Point a tag at a build
+      description: |
+        Point a tag of the image at the build with this digest, creating the
+        tag if it does not exist. Boxes created afterwards with the tag boot
+        that build; boxes already created keep what they booted, and nothing
+        is pulled. Every move is kept in the image's history. A digest that is
+        not a ready build of this image, a tag OCI would refuse, or an image
+        the operator provides is refused with `InvalidArgumentError`. A server
+        that keeps no catalog of tags answers `UnsupportedError`.
+      tags: [Images]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveImageTagRequest"
+      responses:
+        "200":
+          description: The image as it now is
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageDetail"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  # -------------------------------------------------------------------------
+  # Registries
+  # -------------------------------------------------------------------------
+  /{prefix}/registries:
+    parameters:
+      - $ref: "#/components/parameters/prefix"
+
+    get:
+      operationId: listRegistries
+      summary: List registry logins
+      description: |
+        The logins the server presents when it pulls a private image for a
+        box, oldest first. No login carries its password.
+      tags: [Registries]
+      responses:
+        "200":
+          description: The routing slot's registry logins
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRegistriesResponse"
+
+    post:
+      operationId: createRegistry
+      summary: Add a registry login
+      description: |
+        The password is stored where the server cannot read it back, and is
+        never returned. A login is held per registry and prefix: a second one
+        for the same pair is refused with `AlreadyExistsError`. A server that
+        cannot pull private images answers `UnsupportedError`.
+      tags: [Registries]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRegistryRequest"
+      responses:
+        "201":
+          description: The login, without its password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryCredential"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "409":
+          description: A login is already held for this registry and prefix
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  message: "A credential for ghcr.io/acme/ already exists; remove it before adding another"
+                  type: AlreadyExistsError
+                  code: already_exists
+        "501":
+          description: This server does not pull private images
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /{prefix}/registries/{registry_id}:
+    parameters:
+      - $ref: "#/components/parameters/prefix"
+      - $ref: "#/components/parameters/registryId"
+
+    delete:
+      operationId: removeRegistry
+      summary: Remove a registry login
+      description: |
+        Removes the login and destroys its password. A server refuses with
+        `InvalidStateError`, naming the boxes, while a box still pulls through
+        the login.
+      tags: [Registries]
+      responses:
+        "204":
+          description: The login is gone, and its password destroyed
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
 
 # ===========================================================================
 # Components
@@ -1328,14 +1468,34 @@ components:
         type: string
       example: exec-01HJK5ABCDEF
 
-    imageId:
-      name: image_id
+    imageName:
+      name: image_name
       in: path
       required: true
-      description: Image manifest digest (e.g., `sha256:abc123...`)
+      description: |
+        Registry and repository, without a tag or digest. It has slashes, so
+        it is sent URL-encoded as one segment.
       schema:
         type: string
-      example: "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"
+      example: "quay.io%2Facme%2Fapp"
+
+    imageTag:
+      name: tag
+      in: path
+      required: true
+      description: Tag to point at the build
+      schema:
+        type: string
+      example: stable
+
+    registryId:
+      name: registry_id
+      in: path
+      required: true
+      description: Server-assigned registry login identifier
+      schema:
+        type: string
+        format: uuid
 
     volumeId:
       name: volume_id
@@ -1622,8 +1782,7 @@ components:
           type: string
           description: Human-readable label. Optional.
         path_prefix:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: |
             Routing-slot value the client should substitute into the
             `{prefix}` URL parameter on box-scoped requests. Opaque
@@ -1652,9 +1811,8 @@ components:
             so under-scoped credentials surface immediately rather than
             at first use.
         expires_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
           description: |
             Optional expiry. `null` for long-lived dashboard-issued keys;
             ISO 8601 timestamp for rotating credentials.
@@ -1782,8 +1940,7 @@ components:
           maxLength: 128
           example: 01HJK4TNRPQSXYZ8WM6NCVT9R5
         name:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: User-defined name (unique within the routing-slot scope)
           example: my-box
         status:
@@ -1805,8 +1962,7 @@ components:
             activity, which is always the case for a server without an
             AutoStop sweeper.
         pid:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: VMM subprocess PID (null if not running)
         image:
           type: string
@@ -2343,8 +2499,7 @@ components:
           items:
             $ref: "#/components/schemas/Box"
         next_page_token:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: |
             Opaque token for next page. Null or absent if no more results.
 
@@ -2409,19 +2564,16 @@ components:
             - killed
             - timed_out
         exit_code:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Process exit code (null while running)
         started_at:
           type: string
           format: date-time
         duration_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Total execution duration in milliseconds
         error_message:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: Diagnostic message if process died unexpectedly
 
     SignalRequest:
@@ -2509,29 +2661,23 @@ components:
           type: integer
           description: Bytes received from box via stdout/stderr (monotonic)
         cpu_percent:
-          type: number
+          type: [number, "null"]
           format: float
-          nullable: true
           description: CPU usage percentage (0.0 - 100.0)
         memory_bytes:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Current memory usage in bytes
         network_bytes_sent:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Network bytes sent (host → guest)
         network_bytes_received:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Network bytes received (guest → host)
         network_tcp_connections:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Current ESTABLISHED TCP connections
         network_tcp_errors:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Total failed TCP connection attempts
         boot_timing:
           $ref: "#/components/schemas/BootTiming"
@@ -2541,36 +2687,28 @@ components:
       description: Stage-level initialization timing breakdown (milliseconds)
       properties:
         total_create_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Total time from create() to box ready
         guest_boot_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Time from subprocess spawn to guest agent ready
         filesystem_setup_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Stage 1: directory structure creation"
         image_prepare_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Stage 2: image pull and layer extraction"
         guest_rootfs_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Stage 3: guest rootfs bootstrap"
         box_config_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Stage 4: disk and network configuration"
         box_spawn_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Stage 5: subprocess spawn"
         container_init_ms:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: "Stage 6: container initialization inside guest"
 
     # =======================================================================
@@ -2578,7 +2716,7 @@ components:
     # =======================================================================
     ImageInfo:
       type: object
-      description: Cached container image metadata (maps to ImageInfo)
+      description: One reference a server holds (maps to ImageInfo)
       required: [reference, repository, tag, id, cached_at]
       properties:
         reference:
@@ -2600,20 +2738,118 @@ components:
         cached_at:
           type: string
           format: date-time
-          description: When the image was pulled into the local cache
+          description: When the build this reference names was recorded
         size_bytes:
-          type: integer
-          nullable: true
+          type: [integer, "null"]
           description: Image size in bytes
 
-    PullImageRequest:
+    ImageDetail:
       type: object
-      required: [reference]
+      description: An image name and every build held under it (maps to ImageDetail)
+      required: [name, tags, curated, versions]
       properties:
-        reference:
+        name:
           type: string
-          description: Image reference to pull from registry
-          example: python:3.11-slim
+          description: Registry and repository, without a tag
+          example: quay.io/acme/app
+        tags:
+          type: array
+          items:
+            type: string
+        curated:
+          type: boolean
+          description: Provided by the operator rather than recorded from a pull
+        versions:
+          type: array
+          description: Each build held, newest first
+          items:
+            $ref: "#/components/schemas/ImageVersion"
+        history:
+          type: array
+          description: |
+            Where each tag has pointed, newest first. A server may keep only
+            the most recent moves; one that keeps no catalog answers it empty.
+          items:
+            $ref: "#/components/schemas/ImageTagEvent"
+
+    ImageVersion:
+      type: object
+      required: [digest, source_ref, recorded_at]
+      properties:
+        digest:
+          type: string
+          description: Manifest digest
+        size_bytes:
+          type: [integer, "null"]
+          description: Sum of the layer sizes the manifest declares, when known
+        source_ref:
+          type: string
+          description: The reference that was pulled to get this build
+        recorded_at:
+          type: string
+          format: date-time
+        tags:
+          type: array
+          description: Tags that point at this build now
+          items:
+            type: string
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+          description: When a box last started from this build. Null when that is not known
+        upstream_missing_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When a pull first found the build gone from its registry. Runners
+            that cached it still start it. Null while it is not known to be gone.
+
+    ImageTagEvent:
+      type: object
+      description: One move of a tag, or the pull that first recorded it
+      required: [tag, to_digest, moved_at]
+      properties:
+        tag:
+          type: string
+          example: stable
+        from_digest:
+          type: [string, "null"]
+          description: Build the tag pointed at before. Null when the tag did not exist yet
+        to_digest:
+          type: string
+          description: Build the tag points at from then on
+        actor:
+          type: [string, "null"]
+          description: Who moved the tag. Null when a pull recorded it
+        moved_at:
+          type: string
+          format: date-time
+
+    MoveImageTagRequest:
+      type: object
+      required: [digest]
+      properties:
+        digest:
+          type: string
+          description: Manifest digest of a build the image holds
+          pattern: "^sha256:[a-f0-9]{64}$"
+          example: "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4"
+
+    ImageUsage:
+      type: object
+      required: [count, limit, known_bytes]
+      properties:
+        count:
+          type: integer
+          description: Images held
+        limit:
+          type: integer
+          description: Most images the routing slot may hold
+        known_bytes:
+          type: integer
+          description: |
+            Sum of the sizes the held builds' manifests declare. Not the bytes
+            stored: a layer two builds share is counted for each.
 
     ListImagesResponse:
       type: object
@@ -2624,6 +2860,69 @@ components:
           items:
             $ref: "#/components/schemas/ImageInfo"
         next_page_token:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: Opaque token for next page
+
+    # =======================================================================
+    # Registries
+    # =======================================================================
+    CreateRegistryRequest:
+      type: object
+      required: [registry_host, username, password]
+      properties:
+        registry_host:
+          type: string
+          description: The registry the login is for; the server says which it takes logins for
+          example: ghcr.io
+        repository_prefix:
+          type: string
+          description: |
+            The repositories it covers, as whole path segments ending in `/`.
+            Omitted or empty for the whole registry.
+          maxLength: 255
+          example: acme/
+        username:
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: acme-bot
+        password:
+          type: string
+          description: Password or access token. Never returned.
+          writeOnly: true
+          minLength: 1
+          maxLength: 8192
+
+    RegistryCredential:
+      type: object
+      description: A registry login. There is no password field.
+      required: [id, registry_host, repository_prefix, username, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        registry_host:
+          type: string
+          example: ghcr.io
+        repository_prefix:
+          type: string
+          description: Empty for the whole registry
+          example: acme/
+        username:
+          type: string
+          example: acme-bot
+        created_by:
+          type: [string, "null"]
+          description: The user who added it
+        created_at:
+          type: string
+          format: date-time
+
+    ListRegistriesResponse:
+      type: object
+      required: [registries]
+      properties:
+        registries:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistryCredential"

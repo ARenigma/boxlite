@@ -8,10 +8,11 @@ import { InjectDataSource } from '@nestjs/typeorm'
 import { DataSource, EntityManager, IsNull } from 'typeorm'
 import { Image } from '../entities/image.entity'
 import { ImageTag } from '../entities/image-tag.entity'
+import { ImageTagEvent } from '../entities/image-tag-event.entity'
 import { ImageVersion } from '../entities/image-version.entity'
 import { ImageSourceKind } from '../enums/image-source-kind.enum'
 import { CuratedImagePinService } from './curated-image-pin.service'
-import { IMPLICIT_TAG, isSha256Digest, parseImageRef } from '../utils/image-ref.util'
+import { IMPLICIT_TAG, isSha256Digest, parseImageRef, upstreamRefOf } from '../utils/image-ref.util'
 
 /** What a runner reported about the image a box actually booted from. */
 export type ReportedImage = {
@@ -93,7 +94,10 @@ export class ImageRegistrarService {
       }
       return
     }
-    const imageRef = image.ref
+    // Filed under the upstream name. A private image boots from a registry
+    // proxy ref, and a catalog keyed by that would list the proxy as the
+    // registry and miss every lookup made by the name the tenant uses.
+    const imageRef = upstreamRefOf(image.ref)
 
     const { host, repository, tag, digest } = parseImageRef(imageRef)
     const name = `${host}/${repository}`
@@ -117,15 +121,15 @@ export class ImageRegistrarService {
       // Both branches of the upsert return the row, and a name held only by a
       // soft-deleted image does not conflict at all: the insert succeeds and
       // the organization gets a fresh active row. That is what the partial
-      // index is for — deleting an image is how a tenant will pick up a moved
-      // tag, and using it again brings it back as a new entry. Nothing soft-
-      // deletes a row yet; the index has to be right before something does, or
-      // the first delete is also a migration.
+      // index is for — deleting an image is how a tenant picks up a moved tag,
+      // and using it again brings it back as a new entry.
       const imageId: string | undefined = image.raw?.[0]?.id
       if (!imageId) {
         throw new Error(`Image upsert for '${name}' returned no row`)
       }
 
+      // The same upsert shape as the image's: a build already recorded keeps
+      // everything it was recorded with, and only when it was last used moves.
       await manager
         .createQueryBuilder()
         .insert()
@@ -137,8 +141,9 @@ export class ImageRegistrarService {
           sourceKind: ImageSourceKind.PULL,
           sourceSpec: { sourceRef: imageRef },
           storageRef: `${name}@${reported.digest}`,
+          lastUsedAt: new Date(),
         })
-        .orIgnore()
+        .orUpdate(['lastUsedAt'], ['imageId', 'digest'])
         .execute()
 
       // A ref the caller already pinned names no tag to record — it is the
@@ -163,15 +168,28 @@ export class ImageRegistrarService {
 
       // `DO NOTHING`, not an update: a tag that already points somewhere stays
       // there. Following a moved tag would change what a box boots from with
-      // nobody asking, and deleting the image is the intended way to pick up a
-      // move, once the catalog API exposes one.
-      await manager
+      // nobody asking; a tag moves only when someone moves it, and picking up
+      // where it points upstream is `DELETE /images/:idOrRef`.
+      const recorded = await manager
         .createQueryBuilder()
         .insert()
         .into(ImageTag)
         .values({ imageId, name: recordedTag, versionId: version.id })
         .orIgnore()
+        .returning(['id'])
         .execute()
+      if (recorded.raw.length === 0) {
+        return
+      }
+      // The tag's first event, so the history starts where the tag did. No
+      // actor: a pull recorded it, not anyone moving it.
+      await manager.insert(ImageTagEvent, {
+        imageId,
+        tagName: recordedTag,
+        fromVersionId: null,
+        toVersionId: version.id,
+        actorId: null,
+      })
     })
   }
 

@@ -200,6 +200,65 @@ pub(super) struct ListVolumesResponse {
     pub volumes: Vec<VolumeResponse>,
 }
 
+/// One reference, as `GET /v1/images` lists it.
+#[derive(Serialize)]
+pub(super) struct ImageInfoResponse {
+    pub reference: String,
+    pub repository: String,
+    pub tag: String,
+    pub id: String,
+    pub cached_at: String,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ListImagesResponse {
+    pub images: Vec<ImageInfoResponse>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ImageVersionResponse {
+    pub digest: String,
+    pub size_bytes: Option<u64>,
+    pub source_ref: String,
+    pub recorded_at: String,
+    pub tags: Vec<String>,
+    pub last_used_at: Option<String>,
+    pub upstream_missing_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ImageTagEventResponse {
+    pub tag: String,
+    pub from_digest: Option<String>,
+    pub to_digest: String,
+    pub actor: Option<String>,
+    pub moved_at: String,
+}
+
+/// Body for `GET /v1/images/{name}` and `PUT /v1/images/{name}/tags/{tag}`.
+#[derive(Serialize)]
+pub(super) struct ImageDetailResponse {
+    pub name: String,
+    pub tags: Vec<String>,
+    pub curated: bool,
+    pub versions: Vec<ImageVersionResponse>,
+    pub history: Vec<ImageTagEventResponse>,
+}
+
+/// Body for `PUT /v1/images/{name}/tags/{tag}`.
+#[derive(Deserialize)]
+pub(super) struct MoveTagRequest {
+    pub digest: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct ImageUsageResponse {
+    pub count: u64,
+    pub limit: u64,
+    pub known_bytes: u64,
+}
+
 // ============================================================================
 // Execution Types
 // ============================================================================

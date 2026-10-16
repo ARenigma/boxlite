@@ -1788,7 +1788,9 @@ async fn get_or_attach_main_session(
 // ============================================================================
 
 fn build_router(state: Arc<AppState>) -> Router {
-    use handlers::{advanced, boxes, config, executions, files, me, metrics, snapshots, volumes};
+    use handlers::{
+        advanced, boxes, config, executions, files, images, me, metrics, snapshots, volumes,
+    };
 
     Router::new()
         // Identity (no tenant prefix)
@@ -1805,6 +1807,14 @@ fn build_router(state: Arc<AppState>) -> Router {
             "/v1/volumes/{id}",
             get(volumes::get_volume).delete(volumes::remove_volume),
         )
+        // Images (usage first — static path before param path)
+        .route("/v1/images", get(images::list_images))
+        .route("/v1/images/usage", get(images::image_usage))
+        .route(
+            "/v1/images/{name}",
+            get(images::get_image).delete(images::remove_image),
+        )
+        .route("/v1/images/{name}/tags/{tag}", put(images::move_image_tag))
         // Box CRUD (import first — static path before param path)
         .route("/v1/boxes/import", post(advanced::import_box))
         .route(
@@ -3376,6 +3386,68 @@ mod tests {
             let _ = axum::serve(listener, build_router(state)).await;
         });
         (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    /// `rt.images()` on a REST runtime pointed at `serve` reaches the cache of
+    /// the runtime `serve` runs, each call on its own route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn images_over_http_reach_the_local_cache() {
+        let home = tempfile::tempdir().expect("runtime home");
+        let local = BoxliteRuntime::new_for_test(boxlite::BoxliteOptions {
+            home_dir: home.path().join("boxlite"),
+            ..Default::default()
+        })
+        .expect("local runtime");
+        let state = Arc::new(AppState {
+            runtime: local.clone(),
+            boxes: RwLock::new(HashMap::new()),
+            executions: RwLock::new(HashMap::new()),
+            api_key: None,
+            lifecycle: RwLock::new(HashMap::new()),
+            last_activity: RwLock::new(HashMap::new()),
+        });
+        let (url, server) = serve_router(state).await;
+        let remote =
+            BoxliteRuntime::rest(boxlite::BoxliteRestOptions::new(url)).expect("rest runtime");
+        let images = remote.images().expect("image handle");
+
+        assert!(images.list().await.expect("list").is_empty());
+
+        // The name crosses as one encoded segment; the cache's refusal names it.
+        let missing = images.get("quay.io/acme/app").await.unwrap_err();
+        assert!(
+            matches!(missing, boxlite::BoxliteError::NotFound(_)),
+            "{missing}"
+        );
+        assert!(
+            missing.to_string().contains("quay.io/acme/app"),
+            "{missing}"
+        );
+        let gone = images.remove("quay.io/acme/app").await.unwrap_err();
+        assert!(matches!(gone, boxlite::BoxliteError::NotFound(_)), "{gone}");
+
+        // Read as an image name, "usage" would be refused as an invalid
+        // argument; on its own route the cache answers that it has no usage.
+        let usage = images.usage().await.unwrap_err();
+        assert!(
+            matches!(usage, boxlite::BoxliteError::Unsupported(_)),
+            "{usage}"
+        );
+
+        // The cache keeps no catalog of tags, so a move is refused on its route
+        // rather than read as some other request.
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let moved = images
+            .move_tag("quay.io/acme/app", "stable", &digest)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(moved, boxlite::BoxliteError::Unsupported(_)),
+            "{moved}"
+        );
+
+        server.abort();
+        local.shutdown(Some(1)).await.expect("shutdown runtime");
     }
 
     /// Reading a box back over HTTP must report the deadlines `serve` holds.

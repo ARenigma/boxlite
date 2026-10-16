@@ -282,6 +282,24 @@ impl ImageStore {
         inner.index.list_all()
     }
 
+    /// Drop every reference `is_match` accepts from the index, all of them or,
+    /// on error, none, and return how many went. They are chosen under the
+    /// same write lock that drops them, so a reference a pull indexes
+    /// meanwhile is either among them or indexed after. Their layers stay in
+    /// storage, so pulling one of these builds again reuses them.
+    pub async fn forget_matching(&self, is_match: impl Fn(&str) -> bool) -> BoxliteResult<usize> {
+        let inner = self.inner.write().await;
+        let references: Vec<String> = inner
+            .index
+            .list_all()?
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .filter(|reference| is_match(reference))
+            .collect();
+        inner.index.remove_all(&references)?;
+        Ok(references.len())
+    }
+
     /// Load an OCI image from a local directory.
     ///
     /// Reads OCI layout files (index.json, manifest blob) using oci-spec types
@@ -1431,7 +1449,17 @@ impl RegistryPullError {
             OciDistributionError::ServerError { code, .. } => *code >= 500,
             _ => false,
         };
-        let error = BoxliteError::Storage(format!("failed to pull {what}: {error}"));
+        let codes = match &error {
+            OciDistributionError::RegistryError { envelope, .. } => {
+                registry_codes(envelope.errors.iter().map(|e| &e.code))
+            }
+            // The client keeps no body for a 401, so its status is the code.
+            OciDistributionError::UnauthorizedError { .. } => {
+                registry_codes([&OciErrorCode::Unauthorized])
+            }
+            _ => String::new(),
+        };
+        let error = BoxliteError::Storage(format!("failed to pull {what}{codes}: {error}"));
         if throttled {
             Self::Throttled(error)
         } else if unanswered {
@@ -1465,7 +1493,10 @@ impl RegistryPullError {
         let refused = codes
             .iter()
             .any(|code| matches!(code, OciErrorCode::Unauthorized | OciErrorCode::Denied));
-        let error = BoxliteError::Storage(format!("failed to pull a registry token: {error}"));
+        let error = BoxliteError::Storage(format!(
+            "failed to pull a registry token{}: {error}",
+            registry_codes(&codes)
+        ));
         if throttled {
             Self::Throttled(error)
         } else if refused || !matches!(auth, OciRegistryAuth::Anonymous) {
@@ -1479,6 +1510,29 @@ impl RegistryPullError {
         match self {
             Self::Unanswered(error) | Self::Throttled(error) | Self::Failed(error) => error,
         }
+    }
+}
+
+/// The error codes a registry answered with, as ` [MANIFEST_UNKNOWN]`, or
+/// nothing when it sent none.
+///
+/// The client renders an error by its free-text message alone, which every
+/// registry words its own way; the code is what tells an image that is gone
+/// from one this caller may not read. It goes into the message because the
+/// message is all a runner reports of a failed pull, and the control plane
+/// reads the code back from there.
+fn registry_codes<'a>(
+    codes: impl IntoIterator<Item = &'a oci_client::errors::OciErrorCode>,
+) -> String {
+    let names: Vec<String> = codes
+        .into_iter()
+        .filter_map(|code| serde_json::to_value(code).ok())
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", names.join(", "))
     }
 }
 
@@ -1998,6 +2052,97 @@ pub(super) mod tests {
         assert!(!manifest.manifest_digest.is_empty());
     }
 
+    /// Removing an image forgets its tag and its digest alias together. If the
+    /// database refuses partway, both must stay: losing only the tag leaves the
+    /// image listed with no name a caller would pull it by.
+    #[tokio::test]
+    async fn forget_matching_keeps_every_reference_when_one_cannot_be_removed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&temp_dir.path().join("test.db")).unwrap();
+        let store = ImageStore::new(temp_dir.path().join("images"), db.clone(), vec![]).unwrap();
+        let tag = "quay.io/acme/app:v1".to_string();
+        let manifest = seed_cached_image(&store, &tag).await;
+        let alias = format!("quay.io/acme/app@{}", manifest.manifest_digest);
+        seed_cached_build(&store, &alias, &manifest.manifest_digest).await;
+        // Stands in for a delete the database fails, such as on a full disk.
+        // The tag is the older entry, so it is dropped second, after the alias.
+        db.conn()
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_tag BEFORE DELETE ON image_index \
+                 WHEN OLD.reference = '{tag}' BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+            ))
+            .unwrap();
+
+        let error = store
+            .forget_matching(|reference| reference == tag || reference == alias)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("refused"), "{error}");
+        let mut held: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect();
+        held.sort();
+        assert_eq!(held, [tag, alias]);
+    }
+
+    /// A tag a pull indexes while a remove of its image waits for the index
+    /// goes with the remove: what to drop is chosen once the remove holds the
+    /// index, not before it starts waiting.
+    ///
+    /// This guards the locked remove; it cannot replay the old race. Before
+    /// the fix a remove never waited for the index at all, so there was no
+    /// moment for the test to wedge a pull into.
+    #[tokio::test]
+    async fn remove_takes_a_tag_indexed_while_it_waited() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&temp_dir.path().join("test.db")).unwrap();
+        let images =
+            crate::images::ImageManager::new(temp_dir.path().join("images"), db, vec![]).unwrap();
+        let store = images.store();
+        let manifest = seed_cached_image(store, "quay.io/acme/app:v1").await;
+
+        // A pull part-way through `update_index` holds the read lock.
+        let pull = store.inner.read().await;
+        let remove = tokio::spawn({
+            let images = images.clone();
+            async move { images.remove("quay.io/acme/app").await }
+        });
+        // The lock is fair, so once the remove queues for it no reader gets
+        // in; nothing signals that moment, so it is polled.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.inner.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the remove never waited for the index");
+        let pulled = CachedImage {
+            manifest_digest: manifest.manifest_digest,
+            config_digest: manifest.config_digest,
+            layers: vec![],
+            cached_at: chrono::Utc::now().to_rfc3339(),
+            complete: true,
+        };
+        pull.index.upsert("quay.io/acme/app:v2", &pulled).unwrap();
+        drop(pull);
+
+        remove.await.unwrap().unwrap();
+
+        let left: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
     /// Build a cache entry the store will actually accept: the manifest, its
     /// config blob (whose bytes have to hash to the digest the manifest names)
     /// and the layer file, plus the index row that points at them.
@@ -2395,7 +2540,8 @@ pub(super) mod tests {
 
     /// A token service that refuses the pull outright — the repository is
     /// private now — has answered, and the cached copy must not stand in for
-    /// a build this caller may no longer read.
+    /// a build this caller may no longer read. The message names the code, as
+    /// a manifest refusal does: it is what tells a refusal from a missing image.
     #[tokio::test]
     async fn refresh_reports_a_refused_token() {
         for (status, code) in [(401, "UNAUTHORIZED"), (403, "DENIED")] {
@@ -2417,7 +2563,9 @@ pub(super) mod tests {
                 .expect_err("a refused token is the registry's answer, not a gap");
             assert!(
                 !matches!(error, BoxliteError::ResourceExhausted(_))
-                    && error.to_string().contains("registry token"),
+                    && error
+                        .to_string()
+                        .contains(&format!("failed to pull a registry token [{code}]: ")),
                 "{code}: {error}"
             );
         }
@@ -2518,6 +2666,86 @@ pub(super) mod tests {
             matches!(error, BoxliteError::ResourceExhausted(_)),
             "a rate limit must be reported as one, got {error:?}"
         );
+    }
+
+    /// The registry's error code survives into the pull's message, where the
+    /// control plane reads it. The free-text message beside it is each
+    /// registry's own wording; the code is what says the image is gone, or that
+    /// this caller may not read it.
+    #[tokio::test]
+    async fn a_failed_pull_names_the_code_the_registry_answered_with() {
+        for (status, body, code) in [
+            (
+                404,
+                r#"{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}"#,
+                "[MANIFEST_UNKNOWN]",
+            ),
+            (
+                404,
+                r#"{"errors":[{"code":"NAME_UNKNOWN","message":"repository name not known to registry"}]}"#,
+                "[NAME_UNKNOWN]",
+            ),
+            (
+                403,
+                r#"{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}"#,
+                "[DENIED]",
+            ),
+            // The client keeps no body for a 401, so the status stands for it.
+            (401, "", "[UNAUTHORIZED]"),
+        ] {
+            let message = manifest_refusal(status, body).await;
+            assert!(
+                message.contains(&format!("failed to pull manifest {code}: ")),
+                "a {status} must name {code}, got {message}"
+            );
+        }
+    }
+
+    /// No envelope, no code. A web server's error page is not the registry
+    /// saying the image is unknown, and a code read into a bare status would
+    /// report it as gone.
+    #[tokio::test]
+    async fn a_failed_pull_without_an_error_envelope_names_no_code() {
+        let message = manifest_refusal(404, "not found").await;
+
+        assert!(
+            message.contains("failed to pull manifest: "),
+            "a bare 404 must carry no code, got {message}"
+        );
+    }
+
+    /// The message a refresh fails with when the registry answers the version
+    /// probe and then refuses the manifest with `status` and `body`.
+    async fn manifest_refusal(status: u16, body: &'static str) -> String {
+        let content_type = if body.starts_with('{') {
+            "application/json"
+        } else {
+            "text/plain"
+        };
+        let host = registry_serving(vec![
+            ("/v2/".into(), 200, "application/json", b"{}".to_vec()),
+            (
+                "/v2/acme/app/manifests/v1".into(),
+                status,
+                content_type,
+                body.as_bytes().to_vec(),
+            ),
+        ])
+        .await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&temp_dir.path().join("test.db")).unwrap();
+        let store = ImageStore::new(
+            temp_dir.path().join("images"),
+            db,
+            vec![ImageRegistry::http(&host)],
+        )
+        .unwrap();
+
+        store
+            .refresh(&format!("{host}/acme/app:v1"))
+            .await
+            .expect_err("the registry refused the manifest and nothing is cached")
+            .to_string()
     }
 
     /// A tag that moved to a new build is fetched layer by layer. A registry

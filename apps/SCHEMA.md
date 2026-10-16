@@ -59,6 +59,8 @@ flowchart LR
         t_image["image"]
         t_imgver["image_version"]
         t_imgtag["image_tag"]
+        t_imgevent["image_tag_event"]
+        t_regcred["registry_credential"]
     end
 
     subgraph metering["Metering"]
@@ -80,6 +82,8 @@ flowchart LR
     t_imgver ==>|"imageId"| t_image
     t_imgtag ==>|"imageId"| t_image
     t_imgtag ==>|"versionId"| t_imgver
+    t_imgevent ==>|"imageId"| t_image
+    t_imgevent ==>|"fromVersionId, toVersionId"| t_imgver
 
     t_orguser -.->|"userId"| t_user
     t_apikey -.->|"organizationId, userId"| t_org
@@ -90,6 +94,7 @@ flowchart LR
     t_box -.->|"runnerId"| t_runner
     t_box -.->|"volumes[].volumeId"| t_volume
     t_volume -.->|"organizationId"| t_org
+    t_regcred -.->|"organizationId"| t_org
     t_job -.->|"resourceId"| t_box
     t_job -.->|"runnerId"| t_runner
     t_period -.->|"boxId"| t_box
@@ -131,6 +136,9 @@ that no longer resolves.
 | `image_version`                          | `imageId`                    | `image.id`                     | foreign key | `CASCADE` |
 | `image_tag`                              | `imageId`                    | `image.id`                     | foreign key | `CASCADE` |
 | `image_tag`                              | `versionId`                  | `image_version.id`             | foreign key | `RESTRICT` |
+| `image_tag_event`                        | `imageId`                    | `image.id`                     | foreign key | `CASCADE` |
+| `image_tag_event`                        | `fromVersionId`              | `image_version.id`             | foreign key | `RESTRICT` |
+| `image_tag_event`                        | `toVersionId`                | `image_version.id`             | foreign key | `RESTRICT` |
 | `organization_user`                      | `userId`                     | `user.id`                      | application | — |
 | `api_key`                                | `organizationId`, `userId`   | `organization.id`, `user.id`   | application | — |
 | `webhook_initialization`                 | `organizationId`             | `organization.id`              | application | — |
@@ -487,9 +495,9 @@ writes to this table.
 
 One row per upstream repository an organization has pulled, written after a box
 built from it reaches STARTED. Curated images are never rows here: they stay
-env-driven, and the catalog endpoint will union them in at read time when it
-ships. No route serves these tables yet: creating a box reads the catalog,
-nothing returns it.
+env-driven, and the catalog endpoints union them in at read time. `GET /images`,
+`GET /images/usage`, `GET /images/:idOrRef` and `DELETE /images/:idOrRef` read
+these tables; nothing but a box reaching STARTED writes them.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
@@ -503,13 +511,16 @@ nothing returns it.
 Uniqueness is a partial index rather than a table constraint, so a soft-deleted
 name can be used again; `image_org_lastused_index` serves the count the
 admission gate takes when a create names an image the organization does not
-hold yet, and the per-org listing when the catalog API ships.
+hold yet, and the per-org listing the catalog API serves. A soft delete leaves
+the versions and tags behind — the cascade only fires on a real delete — so
+every catalog read joins back to `image` and filters `deletedAt IS NULL`.
 
 ### `image_version`
 
 One row per distinct manifest digest of an image. Rows appear only after a pull
 succeeds, so there is no pending state to go stale — a failed pull is recorded
-on the box that attempted it.
+on the box that attempted it. The one thing a failed pull writes here is
+`upstreamMissingAt`, on a build the registry no longer has.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
@@ -521,6 +532,8 @@ on the box that attempted it.
 | `sourceKind` | `enum` | `pull` |
 | `sourceSpec` | `jsonb` | `{ sourceRef }` — what the user typed |
 | `storageRef` | `text` | where to fetch the bytes from |
+| `lastUsedAt` | `timestamptz` | nullable; when a box last started from this build |
+| `upstreamMissingAt` | `timestamptz` | nullable; when a pull first failed with the registry's `MANIFEST_UNKNOWN` or `NAME_UNKNOWN`. A mark, not a state: never cleared, and the version stays usable on runners that cached it |
 | `createdAt` | `timestamptz` | |
 
 The digest is unique per image, not per organization: the same public image
@@ -528,10 +541,11 @@ reached through two upstream paths is normal usage.
 
 ### `image_tag`
 
-The digest a tag resolved to the first time it was pulled. Tags do not move:
-once recorded, a tag keeps pointing at that version, and the escape hatch will
-be deleting the image and using it again — the delete ships with the catalog
-API, so until then a recorded tag is final.
+The version a tag points at. A pull records a tag the first time it resolves it
+and never moves it after that; only someone moving it on purpose does, and
+every move is an `image_tag_event` row. Picking up where a tag points upstream
+is `DELETE /images/:idOrRef` followed by using the reference again, which brings
+the name back as a fresh entry.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
@@ -542,7 +556,54 @@ API, so until then a recorded tag is final.
 | `updatedAt` | `timestamptz` | |
 
 `versionId` restricts rather than cascades: a version a tag still names must not
-disappear underneath it.
+disappear underneath it. Postgres does not index a foreign key on its own, and
+this one is walked whenever a version is deleted, so `image_tag_version_index`
+covers it.
+
+### `image_tag_event`
+
+Where each tag has pointed. A row is written when a pull first records a tag and
+each time the tag is moved, and never updated, so the history of an image is
+this table read newest first.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `imageId` | `uuid` | → `image.id`, cascade delete |
+| `tagName` | `character varying(128)` | |
+| `fromVersionId` | `uuid` | nullable; → `image_version.id`, **restrict** delete. Null when the tag did not exist before |
+| `toVersionId` | `uuid` | → `image_version.id`, **restrict** delete |
+| `actorId` | `character varying` | nullable; the identity provider subject of whoever moved it. Null when a pull recorded the tag |
+| `createdAt` | `timestamptz` | default `clock_timestamp()` |
+
+`createdAt` is the moment the row is written, not the start of its transaction:
+a move writes it after taking the tag's row lock, so concurrent moves sort in the
+order they took effect. `image_tag_event_image_created_index` on
+`("imageId","createdAt")` serves the newest-first read backwards.
+
+### `registry_credential`
+
+A login an organization registered for a private registry. The password is in
+no column: it is written to Secret Manager, which the API can write but not
+read, and the row keeps only the name of the version that holds it.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `uuid` | primary key |
+| `organizationId` | `uuid` | not null |
+| `kind` | `enum` | `basic` |
+| `registryHost` | `character varying(255)` | e.g. `ghcr.io` |
+| `repositoryPrefix` | `character varying(255)` | default `''`, the whole host |
+| `username` | `character varying(255)` | |
+| `secretVersion` | `text` | the Secret Manager version holding the password |
+| `createdBy` | `character varying` | nullable — the identity provider's subject, not a uuid |
+| `createdAt` / `updatedAt` | `timestamptz` | |
+
+`registry_credential_org_host_prefix_unique` allows one credential per host and
+prefix in an organization; its leading columns also serve the lookup by
+organization and host. `registry_credential_prefix_shape` holds a prefix to
+whole path segments, `''` or ending in `/`, so `acme/` cannot match
+`acme-other/app`.
 
 ### `job`
 

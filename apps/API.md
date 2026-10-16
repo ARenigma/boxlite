@@ -16,6 +16,9 @@ The inventory is implementation-grounded:
   [`boxlite-rest`](./api/src/boxlite-rest/). They are excluded from the product
   OpenAPI document because their portable contract lives in
   [`openapi/box.openapi.yaml`](../openapi/box.openapi.yaml).
+- The registry proxy's runner credential lookup is an internal service route.
+  It is excluded from the Cloud OpenAPI document and generated customer clients;
+  the proxy owns its request and response handling.
 - Runner, proxy, and collector routes come from their runtime registration in
   [`server.go`](./runner/pkg/api/server.go),
   [`proxy.go`](./proxy/pkg/proxy/proxy.go), and
@@ -199,24 +202,53 @@ serves and the events it emits are catalogued below alongside its routes.
 </details>
 
 <details>
-<summary><b>Runners and jobs</b> · 14 routes</summary>
+<summary><b>Image catalog</b> · 5 routes</summary>
 
-| Method   | Path                           | What it does                                                   |
-| -------- | ------------------------------ | -------------------------------------------------------------- |
-| `GET`    | `/api/runners`                 | Lists runners.                                                 |
-| `POST`   | `/api/runners`                 | Registers a runner.                                            |
-| `GET`    | `/api/runners/me`              | Returns the authenticated runner's identity and configuration. |
-| `GET`    | `/api/runners/by-box/{boxId}`  | Resolves the runner assigned to a box.                         |
-| `GET`    | `/api/runners/{id}`            | Gets a runner by ID.                                           |
-| `GET`    | `/api/runners/{id}/full`       | Gets a runner with its full related data.                      |
-| `DELETE` | `/api/runners/{id}`            | Deletes a runner.                                              |
-| `PATCH`  | `/api/runners/{id}/scheduling` | Enables or disables scheduling onto a runner.                  |
-| `PATCH`  | `/api/runners/{id}/draining`   | Enables or disables runner draining.                           |
-| `POST`   | `/api/runners/healthcheck`     | Records or checks runner health.                               |
-| `GET`    | `/api/jobs`                    | Lists jobs assigned to the authenticated runner.               |
-| `GET`    | `/api/jobs/poll`               | Long-polls for work assigned to the runner.                    |
-| `GET`    | `/api/jobs/{jobId}`            | Gets a job by ID.                                              |
-| `POST`   | `/api/jobs/{jobId}/status`     | Reports job progress, success, or failure.                     |
+List and detail responses expose tags only for READY versions, matching the
+versions a box can resolve. Tags of non-ready versions remain stored but are
+omitted from those responses.
+
+| Method   | Path                               | What it does                                                                                                                |
+| -------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/images`                      | Lists the organization's images together with the operator's curated set.                                                   |
+| `GET`    | `/api/images/usage`                | Counts held images against the limit and sums the sizes their versions declared.                                            |
+| `GET`    | `/api/images/{idOrRef}`            | Gets an image, its versions with their tags, last use and whether the registry still has them, and the last 100 tag events. |
+| `PUT`    | `/api/images/{idOrRef}/tags/{tag}` | Points a tag at a ready version and records the move; boxes already created keep their version.                             |
+| `DELETE` | `/api/images/{idOrRef}`            | Removes the catalog entry, not the bytes, unless a box can still boot from it (409 lists the boxes).                        |
+
+</details>
+
+<details>
+<summary><b>Registry credentials</b> · 3 routes</summary>
+
+| Method   | Path                   | What it does                                                                          |
+| -------- | ---------------------- | ------------------------------------------------------------------------------------- |
+| `GET`    | `/api/registries`      | Lists the organization's private registry logins, without passwords.                  |
+| `POST`   | `/api/registries`      | Adds a login; the password is stored where the API cannot read it and never returned. |
+| `DELETE` | `/api/registries/{id}` | Removes a login, unless a box still pulls through it (409 lists the boxes).           |
+
+</details>
+
+<details>
+<summary><b>Runners and jobs</b> · 15 routes</summary>
+
+| Method   | Path                                   | What it does                                                   |
+| -------- | -------------------------------------- | -------------------------------------------------------------- |
+| `GET`    | `/api/runners`                         | Lists runners.                                                 |
+| `POST`   | `/api/runners`                         | Registers a runner.                                            |
+| `GET`    | `/api/runners/me`                      | Returns the authenticated runner's identity and configuration. |
+| `GET`    | `/api/runners/me/registry-credentials` | Internal registry-proxy lookup; excluded from customer OpenAPI and SDKs. |
+| `GET`    | `/api/runners/by-box/{boxId}`          | Resolves the runner assigned to a box.                         |
+| `GET`    | `/api/runners/{id}`                    | Gets a runner by ID.                                           |
+| `GET`    | `/api/runners/{id}/full`               | Gets a runner with its full related data.                      |
+| `DELETE` | `/api/runners/{id}`                    | Deletes a runner.                                              |
+| `PATCH`  | `/api/runners/{id}/scheduling`         | Enables or disables scheduling onto a runner.                  |
+| `PATCH`  | `/api/runners/{id}/draining`           | Enables or disables runner draining.                           |
+| `POST`   | `/api/runners/healthcheck`             | Records or checks runner health.                               |
+| `GET`    | `/api/jobs`                            | Lists jobs assigned to the authenticated runner.               |
+| `GET`    | `/api/jobs/poll`                       | Long-polls for work assigned to the runner.                    |
+| `GET`    | `/api/jobs/{jobId}`                    | Gets a job by ID.                                              |
+| `POST`   | `/api/jobs/{jobId}/status`             | Reports job progress, success, or failure.                     |
 
 </details>
 
@@ -346,13 +378,22 @@ form. The tables write that as `[/{prefix}]`; clients can discover their prefix
 through `GET /api/v1/me`. Except for configuration discovery, these routes use
 combined bearer authentication, then organization authorization.
 
+Image and registry management routes also consume the organization's authenticated
+request quota, shared with `/api/images`, `/api/registries`, and other routes using
+that quota. Canonical and prefixed SDK paths use the same counter. After the quota
+is exhausted, requests return HTTP 429 with `Retry-After-authenticated` before
+catalog changes or registry credential operations run; switching API surfaces
+does not reset it.
+
 Resource permissions are enforced per route. A box mutation — create, start,
 stop, exec, signal, resize, execution kill, file transfer, WebSocket attach, and
 the network routes — requires `write:boxes`; deleting a box requires
 `delete:boxes`. Box reads (list, get, head, execution status, metrics) carry no
 permission and are reached by any member, because the model has no `read:boxes`.
 Volume routes require `read:volumes`, `write:volumes`, or `delete:volumes` to
-match. Attaching a managed volume while creating a box is authorized
+match, image routes `read:images`, `write:images`, or `delete:images`, and
+registry login routes `read:registries`, `write:registries`, or
+`delete:registries`. Attaching a managed volume while creating a box is authorized
 independently of `write:boxes`: the caller must also hold `read:volumes` and
 `write:volumes`, so a box-only credential cannot reach another's volume data
 (GHSA-2qqv-7cwv-mj8h). A system admin and an interactive owner without an API key
@@ -421,6 +462,43 @@ the portable contract, which the runner's own route registration enforces.
 | `GET`    | `/api/v1[/{prefix}]/volumes`                            | Lists volumes in the organization.            |
 | `GET`    | `/api/v1[/{prefix}]/volumes/{volumeId}`                 | Gets a volume by ID.                          |
 | `DELETE` | `/api/v1[/{prefix}]/volumes/{volumeId}?force={boolean}` | Deletes a volume, optionally forcing removal. |
+
+</details>
+
+<details>
+<summary><b>Images</b> · 5 routes</summary>
+
+| Method   | Path                                          | What it does                                                                                           |
+| -------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `GET`    | `/api/v1[/{prefix}]/images`                   | Lists one row per reference the organization can boot from; curated images are left out.               |
+| `GET`    | `/api/v1[/{prefix}]/images/usage`             | Counts held images against the limit and sums the sizes their versions declared.                       |
+| `GET`    | `/api/v1[/{prefix}]/images/{name}`            | Gets an image: its versions with their tags, last use and upstream state, and the last 100 tag events. |
+| `PUT`    | `/api/v1[/{prefix}]/images/{name}/tags/{tag}` | Points a tag at the version with a digest and records the move; needs `write:images`.                  |
+| `DELETE` | `/api/v1[/{prefix}]/images/{name}`            | Removes the catalog entry, not the bytes, unless a box can still boot from it.                         |
+
+The same catalog as `/api/images`, in the box API's snake_case shapes and with
+versions named by digest, for SDK clients.
+
+</details>
+
+<details>
+<summary><b>Registries</b> · 3 routes</summary>
+
+| Method   | Path                                 | What it does                                                                     |
+| -------- | ------------------------------------ | -------------------------------------------------------------------------------- |
+| `GET`    | `/api/v1[/{prefix}]/registries`      | Lists the organization's private registry logins, without passwords.             |
+| `POST`   | `/api/v1[/{prefix}]/registries`      | Adds a login; a second one for the same registry and prefix is `already_exists`. |
+| `DELETE` | `/api/v1[/{prefix}]/registries/{id}` | Removes a login, unless a box still pulls through it (409 lists the boxes).      |
+
+The same logins as `/api/registries`, in the box API's snake_case shapes, for
+SDK clients.
+
+Credential deletion and private-image box persistence coordinate in PostgreSQL.
+If they overlap, the contending request returns 409 and can be retried. A box
+whose resolved proxy reference has lost its credential is also rejected before
+it is saved. Once a dependent box commits, deletion returns 409 with its ID.
+The dependency check reads candidate credentials once for the organization and
+registry host, then matches each box in memory using the longest repository prefix.
 
 </details>
 

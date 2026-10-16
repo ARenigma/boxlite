@@ -37,6 +37,11 @@ case in this suite is using the same fixtures and the same path.
 
 ## Prereqs
 
+`BOXLITE_E2E_CATALOG_IMAGE` accepts tagged, digest-pinned, and untagged
+references, including registry ports such as `registry.local:5000/acme/app`.
+The catalog tests retain the port when deriving the repository name and the
+deliberately unpullable test image.
+
 Set up via the bootstrap script (one-time per machine):
 
 ```bash
@@ -100,10 +105,43 @@ export BOXLITE_E2E_IMAGE=ghcr.io/boxlite-ai/boxlite-agent-base:v0.1.0
 # Skip local-only checks (journalctl, runner log):
 export BOXLITE_E2E_SKIP_PATH_VERIFY=1
 
+# Or keep path verification on a runner started by hand (a local stack on
+# macOS has no systemd journal): read its log file instead of journalctl.
+export BOXLITE_E2E_RUNNER_LOG=/path/to/runner.log
+
+# Image the catalog case boots, which must be on a host the API's allowlist
+# admits. Defaults to a small public one on quay.io, so a run needs no override:
+export BOXLITE_E2E_CATALOG_IMAGE=quay.io/libpod/alpine:latest
+
+# Two tags of one repository with different digests, the repository spelled
+# the same in both, which the tag case pulls and moves a tag between. Defaults
+# to two alpine releases on Docker Hub, so a run needs no override. Moving a
+# tag takes the write:images scope, which an API key made before that scope
+# existed does not have:
+export BOXLITE_E2E_TAG_IMAGE_OLD=docker.io/library/alpine:3.19
+export BOXLITE_E2E_TAG_IMAGE_NEW=docker.io/library/alpine:3.20
+
+# Only for a stack that predates the image catalog: skip that case instead of
+# failing. Without it a 404 on /images is treated as the regression it is:
+export BOXLITE_E2E_ALLOW_MISSING_CATALOG=1
+
+# The private image case runs only with a real private image and its login,
+# written with its host and a tag or digest. The prefix defaults to the
+# image's namespace. It adds its own login and refuses to start while the
+# organization already has one for that registry and prefix:
+export BOXLITE_E2E_PRIVATE_IMAGE=ghcr.io/acme/private-app:1
+export BOXLITE_E2E_PRIVATE_USERNAME=acme-bot
+export BOXLITE_E2E_PRIVATE_PASSWORD=...        # a token with read access only
+export BOXLITE_E2E_PRIVATE_PREFIX=acme/
+
 # CLI tests need a profile pointing at the remote API:
 export BOXLITE_E2E_PROFILE=p1
 export BOXLITE_E2E_CLI=/path/to/boxlite   # CLI binary built with REST support
 ```
+
+Private-image cleanup keeps its login record until deletion succeeds. If the
+removal step fails, teardown retries that login; a transient failure must not
+leave an untracked credential that prevents the next run.
 
 Then run the profile into `~/.boxlite/credentials.toml` so the CLI
 picks it up (one-time per machine):
@@ -176,6 +214,7 @@ apps/e2e/
 ├── two_sided.sh             # Validates that test catches bug + PR fixes it
 ├── pytest.ini
 ├── lib/
+│   ├── catalog_boxes.py     # Boxes against the catalog: pull budget, report window
 │   ├── e2e_auth.py          # Auth context: API-key / OIDC, env vars / profile
 │   ├── images.py            # Curated ref derived from apps/box-images/VERSION
 │   └── path_verification.py # Helpers that prove SDK→API→Runner was the route
@@ -195,6 +234,9 @@ apps/e2e/
     ├── test_node_coverage.py        # Node SDK exec, copy, errors
     ├── test_go_entry.py             # Go SDK smoke
     ├── test_go_coverage.py          # Go SDK exec options, copy, errors
+    ├── test_images_catalog.py       # Image catalog via rt.images: booting records it, remove drops it, admission refuses bad hosts
+    ├── test_images_private.py       # Private image through a login added with rt.registries
+    ├── test_images_tags.py          # Moving a tag via rt.images: the next box follows, others keep theirs
     ├── test_c_entry.py              # C SDK smoke
     └── test_c_coverage.py           # C SDK exec, errors
 ```

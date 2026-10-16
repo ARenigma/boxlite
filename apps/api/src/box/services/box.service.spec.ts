@@ -17,8 +17,12 @@ import { Image } from '../../image/entities/image.entity'
 import { ImageVersion } from '../../image/entities/image-version.entity'
 import { ImageAdmissionService } from '../../image/services/image-admission.service'
 import { ImageResolverService } from '../../image/services/image-resolver.service'
+import { RegistryCredentialService } from '../../registry/services/registry-credential.service'
 import { CreateBoxDto as RestCreateBoxDto } from '../../boxlite-rest/dto/create-box.dto'
 import { createBoxToCreateBox } from '../../boxlite-rest/mappers/box-to-box.mapper'
+
+/** Records every reason as it came, which is what a failure it cannot explain gets. */
+const passThroughPullFailures = () => ({ reasonFor: jest.fn(async (_box: unknown, reason: string) => reason) }) as any
 
 // ensureStartedForProxy only touches boxRepository + eventEmitter +
 // organizationService; every other injected dependency is irrelevant.
@@ -58,6 +62,8 @@ function makeService() {
     noop, // imageAdmissionService
     noop, // imageResolverService
     noop, // imageRegistrarService
+    noop, // imagePreparationService
+    passThroughPullFailures(), // imagePullFailureService
   )
   return { service, boxRepository, eventEmitter, organizationService }
 }
@@ -103,6 +109,8 @@ function makePreviewUrlService() {
     noop, // imageAdmissionService
     noop, // imageResolverService
     noop, // imageRegistrarService
+    noop, // imagePreparationService
+    passThroughPullFailures(), // imagePullFailureService
   )
   jest.spyOn(service, 'findOneByIdOrName').mockResolvedValue({
     id: 'MixedCaseBox',
@@ -311,6 +319,8 @@ function makeNetworkTunnelService() {
     noop, // imageAdmissionService
     noop, // imageResolverService
     noop, // imageRegistrarService
+    noop, // imagePreparationService
+    passThroughPullFailures(), // imagePullFailureService
   )
   jest.spyOn(service, 'findOneByIdOrName').mockResolvedValue({
     id: 'MixedCaseBox',
@@ -346,8 +356,13 @@ describe('BoxService image reporting', () => {
       boxRepository: { findOne: jest.fn().mockResolvedValue(box), updateWhere: jest.fn() },
       logger: { log: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
       imageRegistrarService: { onBoxStarted: jest.fn().mockResolvedValue(undefined) },
+      imagePullFailureService: passThroughPullFailures(),
     })
-    return { service, registrar: (service as any).imageRegistrarService }
+    return {
+      service,
+      registrar: (service as any).imageRegistrarService,
+      pullFailures: (service as any).imagePullFailureService,
+    }
   }
 
   const reported = { digest: `sha256:${'a'.repeat(64)}`, sizeBytes: 4096 }
@@ -399,6 +414,56 @@ describe('BoxService image reporting', () => {
     await service.updateState('box-1', BoxState.ERROR, false, 'Failed to pull artifact image', reported)
 
     expect(registrar.onBoxStarted).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A runner may report why a box failed, and for a private image that reason
+   * names the registry proxy ref it pulled. What is stored is what the tenant
+   * reads, so it names the upstream image they asked for.
+   */
+  it('stores a reported reason with the upstream image in place of the registry proxy ref', async () => {
+    const proxy = 'registry-proxy-abc.a.run.app'
+    process.env.REGISTRY_PROXY_HOST = proxy
+    try {
+      const { service } = makeService(BoxState.STARTED)
+      const proxied = `${proxy}/0aaa0000-0000-4000-8000-000000000001/ghcr.io/acme/app:1`
+
+      await service.updateState('box-1', BoxState.ERROR, false, `Failed to pull image '${proxied}'`)
+
+      expect((service as any).boxRepository.updateWhere).toHaveBeenCalledWith(
+        'box-1',
+        expect.objectContaining({
+          updateData: expect.objectContaining({ errorReason: "Failed to pull image 'ghcr.io/acme/app:1'" }),
+        }),
+      )
+    } finally {
+      delete process.env.REGISTRY_PROXY_HOST
+    }
+  })
+
+  /**
+   * A runner that reports a failed pull as a state, rather than through a job,
+   * gets its reason explained the same way, after the proxy's address is out
+   * of it. A state that is not an error carries no failure to explain.
+   */
+  it('explains the reason of an error report, and only of an error report', async () => {
+    const { service, pullFailures } = makeService(BoxState.STARTED)
+    pullFailures.reasonFor.mockResolvedValue('explained')
+
+    await service.updateState('box-1', BoxState.ERROR, false, 'failed to pull manifest [MANIFEST_UNKNOWN]: x')
+
+    expect(pullFailures.reasonFor).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'box-1' }),
+      'failed to pull manifest [MANIFEST_UNKNOWN]: x',
+    )
+    expect((service as any).boxRepository.updateWhere).toHaveBeenCalledWith(
+      'box-1',
+      expect.objectContaining({ updateData: expect.objectContaining({ errorReason: 'explained' }) }),
+    )
+
+    pullFailures.reasonFor.mockClear()
+    await service.updateState('box-1', BoxState.STOPPED, false, 'stopped by the user')
+    expect(pullFailures.reasonFor).not.toHaveBeenCalled()
   })
 
   /**
@@ -484,7 +549,11 @@ describe('BoxService public defaults', () => {
       },
     } as unknown as Repository<ImageVersion>
     const { service, boxRepository } = makeCreateService({
-      imageResolverService: new ImageResolverService(repository),
+      imageResolverService: new ImageResolverService(repository, {
+        routesThroughProxy: () => {
+          throw new Error('a curated selector must not ask about registered logins')
+        },
+      } as unknown as RegistryCredentialService),
     })
 
     await service.create({ name: 'curated-box', image: 'python' } as any, { id: 'org-1' } as any)
@@ -604,6 +673,7 @@ describe('BoxService public defaults', () => {
         imageAdmissionService: new ImageAdmissionService(
           redis as unknown as Redis,
           images as unknown as Repository<Image>,
+          { routesThroughProxy: jest.fn().mockResolvedValue(false) } as unknown as RegistryCredentialService,
         ),
         imageResolverService: { resolve: jest.fn().mockResolvedValue(resolved) },
         ...overrides,

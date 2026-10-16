@@ -535,6 +535,208 @@ pub(crate) struct ListVolumesResponse {
 }
 
 // ============================================================================
+// Images
+// ============================================================================
+
+/// When the server recorded something; epoch when the time does not parse,
+/// matching the local image cache's deterministic fallback.
+fn recorded_time(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+}
+
+/// One reference, as `GET /v1/{prefix}/images` lists it.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageInfoResponse {
+    pub reference: String,
+    pub repository: String,
+    pub tag: String,
+    pub id: String,
+    pub cached_at: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+impl ImageInfoResponse {
+    pub fn into_image_info(self) -> crate::runtime::types::ImageInfo {
+        crate::runtime::types::ImageInfo {
+            cached_at: recorded_time(&self.cached_at),
+            reference: self.reference,
+            repository: self.repository,
+            tag: self.tag,
+            id: self.id,
+            size: self
+                .size_bytes
+                .map(crate::runtime::types::Bytes::from_bytes),
+        }
+    }
+}
+
+/// Response for `GET /v1/{prefix}/images`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListImagesResponse {
+    pub images: Vec<ImageInfoResponse>,
+}
+
+/// A time the server may leave out; `None` when it does, or when it does not
+/// parse, rather than a time nobody observed.
+fn optional_time(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw?)
+        .ok()
+        .map(|time| time.with_timezone(&chrono::Utc))
+}
+
+/// One build, as `GET /v1/{prefix}/images/{name}` lists it. The fields after
+/// `recorded_at` default, so a server that predates them still reads.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageVersionResponse {
+    pub digest: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    pub source_ref: String,
+    pub recorded_at: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub upstream_missing_at: Option<String>,
+}
+
+/// One move of a tag, as an image's `history` lists it.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageTagEventResponse {
+    pub tag: String,
+    #[serde(default)]
+    pub from_digest: Option<String>,
+    pub to_digest: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+    pub moved_at: String,
+}
+
+/// Response for `GET /v1/{prefix}/images/{name}` and for a tag move.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageDetailResponse {
+    pub name: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub curated: bool,
+    #[serde(default)]
+    pub versions: Vec<ImageVersionResponse>,
+    #[serde(default)]
+    pub history: Vec<ImageTagEventResponse>,
+}
+
+/// Body for `PUT /v1/{prefix}/images/{name}/tags/{tag}`.
+#[derive(Debug, Serialize)]
+pub(crate) struct MoveTagRequest<'a> {
+    pub digest: &'a str,
+}
+
+impl ImageDetailResponse {
+    pub fn into_image_detail(self) -> crate::runtime::types::ImageDetail {
+        crate::runtime::types::ImageDetail {
+            name: self.name,
+            tags: self.tags,
+            curated: self.curated,
+            versions: self
+                .versions
+                .into_iter()
+                .map(|version| crate::runtime::types::ImageVersion {
+                    recorded_at: recorded_time(&version.recorded_at),
+                    last_used_at: optional_time(version.last_used_at.as_deref()),
+                    upstream_missing_at: optional_time(version.upstream_missing_at.as_deref()),
+                    digest: version.digest,
+                    size_bytes: version.size_bytes,
+                    source_ref: version.source_ref,
+                    tags: version.tags,
+                })
+                .collect(),
+            history: self
+                .history
+                .into_iter()
+                .map(|event| crate::runtime::types::ImageTagEvent {
+                    moved_at: recorded_time(&event.moved_at),
+                    tag: event.tag,
+                    from_digest: event.from_digest,
+                    to_digest: event.to_digest,
+                    actor: event.actor,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Response for `GET /v1/{prefix}/images/usage`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageUsageResponse {
+    pub count: u64,
+    pub limit: u64,
+    pub known_bytes: u64,
+}
+
+// ============================================================================
+// Registries
+// ============================================================================
+
+/// Body for `POST /v1/{prefix}/registries`. No `Debug`: it holds the password.
+#[derive(Serialize)]
+pub(crate) struct CreateRegistryRequest<'a> {
+    pub registry_host: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_prefix: Option<&'a str>,
+    pub username: &'a str,
+    pub password: &'a str,
+}
+
+impl<'a> CreateRegistryRequest<'a> {
+    pub fn from_credential(credential: &'a crate::runtime::NewRegistryCredential) -> Self {
+        Self {
+            registry_host: &credential.registry_host,
+            repository_prefix: credential.repository_prefix.as_deref(),
+            username: &credential.username,
+            password: &credential.password,
+        }
+    }
+}
+
+/// One login, as `/v1/{prefix}/registries` answers it. There is no password
+/// field, so one a server sent back is dropped here.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RegistryCredentialResponse {
+    pub id: String,
+    pub registry_host: String,
+    #[serde(default)]
+    pub repository_prefix: String,
+    pub username: String,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    pub created_at: String,
+}
+
+impl RegistryCredentialResponse {
+    pub fn into_registry_credential(self) -> crate::runtime::RegistryCredential {
+        crate::runtime::RegistryCredential {
+            created_at: recorded_time(&self.created_at),
+            id: self.id,
+            registry_host: self.registry_host,
+            repository_prefix: self.repository_prefix,
+            username: self.username,
+            created_by: self.created_by,
+        }
+    }
+}
+
+/// Response for `GET /v1/{prefix}/registries`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListRegistriesResponse {
+    pub registries: Vec<RegistryCredentialResponse>,
+}
+
+// ============================================================================
 // Snapshot / Clone / Export
 // ============================================================================
 
@@ -738,6 +940,48 @@ fn parse_box_status(status: &str) -> BoxStatus {
 mod tests {
     use super::*;
     use crate::runtime::options::BoxOptions;
+
+    #[test]
+    fn rest_recorded_timestamps_are_stable_across_conversions() {
+        for (raw, seconds) in [
+            ("invalid", 0),
+            ("", 0),
+            ("1970-01-02T02:00:00+02:00", 86_400),
+        ] {
+            let info: ImageInfoResponse = serde_json::from_value(serde_json::json!({
+                "reference": "quay.io/acme/app:latest",
+                "repository": "quay.io/acme/app", "tag": "latest",
+                "id": "sha256:abc", "cached_at": raw
+            }))
+            .unwrap();
+            let detail: ImageDetailResponse = serde_json::from_value(serde_json::json!({
+                "name": "quay.io/acme/app",
+                "versions": [{
+                    "digest": "sha256:abc", "source_ref": "quay.io/acme/app:latest",
+                    "recorded_at": raw
+                }],
+                "history": [{"tag": "latest", "to_digest": "sha256:abc", "moved_at": raw}]
+            }))
+            .unwrap();
+            let registry: RegistryCredentialResponse = serde_json::from_value(serde_json::json!({
+                "id": "registry-1", "registry_host": "quay.io",
+                "username": "reader", "created_at": raw
+            }))
+            .unwrap();
+            let detail = detail.into_image_detail();
+            let expected = chrono::DateTime::from_timestamp(seconds, 0).unwrap();
+            assert_eq!(
+                [
+                    info.into_image_info().cached_at,
+                    detail.versions[0].recorded_at,
+                    detail.history[0].moved_at,
+                    registry.into_registry_credential().created_at,
+                ],
+                [expected; 4],
+                "wire timestamp: {raw:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_create_box_request_serialization() {

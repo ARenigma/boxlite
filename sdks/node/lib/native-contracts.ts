@@ -22,9 +22,95 @@ export interface ImagePullResult {
   layerCount: number;
 }
 
+/** One build of an image. */
+export interface ImageVersion {
+  /** Manifest digest, such as `sha256:…`. */
+  digest: string;
+  /** Sum of the layer sizes the manifest declares; absent when unknown. */
+  sizeBytes?: number;
+  /** The reference that was pulled to get this build. */
+  sourceRef: string;
+  /** When this build was recorded, as an RFC 3339 string. */
+  recordedAt: string;
+  /** The image's tags that point at this build. */
+  tags: string[];
+  /** When a box last started from this build; absent when unknown. */
+  lastUsedAt?: string;
+  /**
+   * When a pull found this build gone from its registry; absent while it is
+   * not known to be gone.
+   */
+  upstreamMissingAt?: string;
+}
+
+/** One move of a tag, or the pull that first recorded it; versions named by digest. */
+export interface ImageTagEvent {
+  tag: string;
+  /** The build the tag pointed at before; absent when the tag was new. */
+  fromDigest?: string;
+  toDigest: string;
+  /** Who moved the tag; absent when a pull recorded it. */
+  actor?: string;
+  /** As an RFC 3339 string. */
+  movedAt: string;
+}
+
+/** An image name and every build the runtime holds under it. */
+export interface ImageDetail {
+  /** Registry and repository without a tag, such as `docker.io/library/alpine`. */
+  name: string;
+  tags: string[];
+  /** Provided by the server's operator rather than pulled by a box. */
+  curated: boolean;
+  /** Newest first. */
+  versions: ImageVersion[];
+  /** The latest tag moves, newest first; empty on a local cache. */
+  history: ImageTagEvent[];
+}
+
+/** Images held against the allowance, on a REST runtime. */
+export interface ImageUsage {
+  count: number;
+  limit: number;
+  /**
+   * Sum of the sizes the held builds' manifests declare; a layer two builds
+   * share counts for each.
+   */
+  knownBytes: number;
+}
+
+/**
+ * The images a runtime can boot from: the local cache on an embedded runtime,
+ * the server's catalog on a REST runtime.
+ */
 export interface ImageHandle {
+  /** Pull into the local cache. A REST runtime refuses: creating a box pulls. */
   pull(reference: string): Promise<ImagePullResult>;
   list(): Promise<ImageInfo[]>;
+  /**
+   * Every build held under an image name, such as `docker.io/library/alpine`.
+   *
+   * @throws `not_found` when nothing is held under the name, and
+   * `invalid_argument` for a reference with a tag or digest.
+   */
+  get(name: string): Promise<ImageDetail>;
+  /**
+   * Stop holding an image name, every tag of it. The layers stay.
+   *
+   * @throws `not_found` and `invalid_argument` as {@link ImageHandle.get};
+   * on a REST runtime `invalid_state` while a box can still boot from it.
+   */
+  remove(name: string): Promise<void>;
+  /** Images held against the allowance. @throws `unsupported` locally. */
+  usage(): Promise<ImageUsage>;
+  /**
+   * Point a tag of an image name at the version with that digest; boxes
+   * already created keep theirs.
+   *
+   * @throws `unsupported` locally, and `invalid_argument` for a malformed
+   * name, tag or `sha256:` digest.
+   */
+  moveTag(name: string, tag: string, digest: string): Promise<ImageDetail>;
 }
 
 /** Metadata for a managed volume returned by the native runtime. */
@@ -74,6 +160,51 @@ export interface VolumeHandle {
    * @throws A native BoxLite error when removal fails or volumes are unsupported.
    */
   remove(id: string, force?: boolean | null): Promise<void>;
+}
+
+/** A registry login the server pulls private images with. Has no password. */
+export interface RegistryCredential {
+  /** UUID that {@link RegistryHandle.remove} takes. */
+  id: string;
+  registryHost: string;
+  /** Whole path segments ending in `/`; empty for the whole registry. */
+  repositoryPrefix: string;
+  username: string;
+  /** The user who added it; absent when the server does not know. */
+  createdBy?: string;
+  /** RFC 3339. */
+  createdAt: string;
+}
+
+/** A registry login to add. */
+export interface NewRegistryCredential {
+  /** The registry the login is for, such as `ghcr.io`. */
+  registryHost: string;
+  /** Whole path segments ending in `/`, such as `acme/`; omit for the whole registry. */
+  repositoryPrefix?: string;
+  username: string;
+  /** Password or access token. Sent once, never returned. */
+  password: string;
+}
+
+/** The server's registry logins. A local runtime has none: see {@link JsBoxlite.registries}. */
+export interface RegistryHandle {
+  /** Every login the organization holds, oldest first. */
+  list(): Promise<RegistryCredential[]>;
+  /**
+   * Add a login.
+   *
+   * @throws `already_exists` while one is held for the same registry and prefix.
+   */
+  create(credential: NewRegistryCredential): Promise<RegistryCredential>;
+  /**
+   * Remove a login by id.
+   *
+   * @throws `invalid_state`, naming the boxes, while a box still pulls through
+   * it; `not_found` for an unknown id; `invalid_argument` for an id that is
+   * not a UUID, before any request.
+   */
+  remove(id: string): Promise<void>;
 }
 
 export interface JsEnvVar {
@@ -490,6 +621,13 @@ export interface JsBoxlite {
   metrics(): Promise<JsRuntimeMetrics>;
   readonly images: ImageHandle;
   readonly volumes: VolumeHandle;
+  /**
+   * The server's registry logins.
+   *
+   * @throws `unsupported` on a local runtime, which pulls with the logins in
+   * `imageRegistries` instead.
+   */
+  readonly registries: RegistryHandle;
   remove(idOrName: string, force?: boolean | null): Promise<void>;
   close(): void;
   shutdown(timeout?: number | null): Promise<void>;
